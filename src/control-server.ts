@@ -407,7 +407,11 @@ export function iniciarControlServer(port: number, host: string): void {
       res.end(JSON.stringify({
         hoje: { total: stats.hoje.total, scoreMedio: stats.hoje.score_medio },
         total: stats.total,
-        porPlataforma: stats.porPlataforma,
+        porPlataforma: stats.porPlataforma.map(p => ({
+          plataforma: p.plataforma,
+          total: p.total,
+          scoreMedio: p.score_medio,
+        })),
         porStatus: stats.porStatus,
         funil: {
           enviadas: totalCandidaturas,

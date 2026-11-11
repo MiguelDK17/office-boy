@@ -197,6 +197,18 @@
   background: #f59e0b;
 }
 
+/* Backend fora do ar: chip âmbar/vermelho discreto, coerente com a paleta. */
+.status-offline {
+  color: #d97706;
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.status-offline .status-dot {
+  background: #f59e0b;
+  animation: pulse 2.4s infinite;
+}
+
 .icon-button {
   width: 40px;
   height: 40px;
@@ -1225,6 +1237,23 @@ main.with-expanded-terminal {
 
 .log-error > span:last-child {
   color: #f6ad78;
+}
+
+/* Tons extras de log do bot real (níveis do logger do Office Boy). */
+.log-warn > span:last-child {
+  color: #fbbf24;
+}
+
+.log-tool > span:last-child {
+  color: #6ee7b7;
+}
+
+.log-agent > span:last-child {
+  color: #5ee5d0;
+}
+
+.error-message {
+  color: #ef4444;
 }
 
 .terminal-cursor {
