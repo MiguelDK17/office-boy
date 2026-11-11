@@ -6,6 +6,11 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "ui": "CONTROL_MODE=true tsx src/index.ts",
+    "ui:dev": "CONTROL_MODE=true DASHBOARD_ENABLED=false tsx src/index.ts",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "dev:all": "npm run ui:dev & npm run web:dev & wait",
     "resultado": "tsx src/marcar-resultado.ts",
     "chrome": "google-chrome --remote-debugging-port=9222",
     "test": "vitest",

@@ -9,15 +9,19 @@
 // parado, ter seu exit code consultado) e a UI sobrevive entre execuções.
 //
 // Endpoints:
-//   GET  /             → dashboard (com painel de controle)
+//   GET  /             → front React (web/dist; sem build → redirect /legacy)
+//   GET  /legacy       → dashboard HTML antigo (até a nova UI ser validada)
 //   GET  /api/status   → estado do run (rodando, pid, custo, dry-run)
+//   GET  /api/data     → métricas, funil e candidaturas recentes (JSON)
 //   GET  /api/logs     → últimas linhas de log do run
+//   GET  /events       → SSE: snapshot + log/estado/progresso ao vivo
 //   POST /api/start    → inicia o bot ({ dryRun?: boolean, maxIteracoes?: number })
 //   POST /api/stop     → para o bot em andamento
 
 import http from 'http';
 import { spawn, type ChildProcess } from 'child_process';
 import path from 'path';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { log } from './logger.js';
 import { inicializarBanco, contarCandidaturasDesde, listarCandidaturas, obterEstatisticas } from './database.js';
@@ -25,9 +29,26 @@ import { gerarHTML } from './dashboard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Front React (web/dist). Se o build ainda não existir, "/" cai no dashboard
+// legado — permite rodar o backend sem precisar do front compilado.
+const WEB_DIST = path.resolve(__dirname, '..', 'web', 'dist');
+
 const MAX_LINHAS_LOG = 400;
 /** Clientes conectados no stream SSE /events. */
 const clientesSse = new Set<http.ServerResponse>();
+
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8',
+  '.map': 'application/json',
+  '.woff2': 'font/woff2',
+};
 
 // Teto de iteracoes configurável na UI (PADRAO_MAX_ITERACOES = fallback do .env,
 // 500 quando o .env não define; clamp: 1 evita run de 0 iteracoes, teto de
@@ -327,6 +348,49 @@ function urlDoNoVnc(req: http.IncomingMessage): string | undefined {
   return `http://${host}:${portaNoVnc}/vnc.html?autoconnect=1&resize=scale`;
 }
 
+/**
+ * Serve os arquivos do front React (web/dist). Caminho seguro contra path
+ * traversal: o caminho resolvido precisa continuar dentro de WEB_DIST.
+ * Sem o build pronto, "/" e rotas desconhecidas caem no dashboard legado.
+ */
+function servirEstatico(req: http.IncomingMessage, res: http.ServerResponse, caminho: string): void {
+  if (!existsSync(WEB_DIST)) {
+    // Build do front ausente: nem tenta — legado direto.
+    res.writeHead(302, { Location: '/legacy' });
+    res.end();
+    return;
+  }
+  const relativo = caminho === '/' || caminho === '/index.html' ? '/index.html' : caminho;
+  let absoluto: string;
+  try {
+    absoluto = path.resolve(WEB_DIST, '.' + relativo);
+  } catch {
+    res.writeHead(400); res.end('bad request'); return;
+  }
+  if (absoluto !== WEB_DIST && !absoluto.startsWith(WEB_DIST + path.sep)) {
+    res.writeHead(403); res.end('forbidden'); return;
+  }
+  if (!existsSync(absoluto) || statSync(absoluto).isDirectory()) {
+    // SPA fallback: rotas desconhecidas recebem o index.html do front.
+    absoluto = path.join(WEB_DIST, 'index.html');
+  }
+  try {
+    const conteudo = readFileSync(absoluto);
+    const ext = path.extname(absoluto).toLowerCase();
+    const ehAsset = relativo.startsWith('/assets/');
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] ?? 'application/octet-stream',
+      'X-Content-Type-Options': 'nosniff',
+      // Assets do Vite têm hash no nome: cache eterno; index.html: sempre revalidar.
+      'Cache-Control': ehAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
+    });
+    res.end(req.method === 'HEAD' ? undefined : conteudo);
+  } catch (err) {
+    log('ERRO', `Control: falha ao servir ${relativo} — ${err instanceof Error ? err.message : String(err)}`);
+    res.writeHead(500); res.end('erro interno');
+  }
+}
+
 function lerCorpo(req: http.IncomingMessage): Promise<string> {  return new Promise((resolve) => {
     let dados = '';
     req.on('data', (c) => {
@@ -347,18 +411,7 @@ export function iniciarControlServer(port: number, host: string): void {
     const caminho = url.split('?')[0];
 
     if (caminho === '/' || caminho === '/index.html') {
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'X-Content-Type-Options': 'nosniff',
-      });
-      res.end(
-        gerarHTML({
-          ativo: true,
-          rodando: estado.rodando,
-          dryRun: estado.dryRun,
-          novncUrl: urlDoNoVnc(req),
-        }),
-      );
+      servirEstatico(req, res, '/');
       return;
     }
 
@@ -466,6 +519,12 @@ export function iniciarControlServer(port: number, host: string): void {
           novncUrl: urlDoNoVnc(req),
         }),
       );
+      return;
+    }
+
+    // Estáticos do front React (assets, favicon) e SPA fallback.
+    if ((req.method === 'GET' || req.method === 'HEAD') && !caminho.startsWith('/api/')) {
+      servirEstatico(req, res, caminho);
       return;
     }
 
