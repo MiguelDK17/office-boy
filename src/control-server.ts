@@ -206,6 +206,7 @@ export async function iniciarRun(
 
   estado.rodando = true;
   estado.parando = false;
+  estado.dryRun = usarDryRun;
   estado.pid = null;
   estado.iniciadoEm = new Date().toISOString();
   estado.encerradoEm = null;
