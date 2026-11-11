@@ -195,7 +195,7 @@ export default function App() {
             </p>
           </div>
 
-          <RobotVisual running={running} />
+          <RobotVisual running={running} stopping={stopping} />
 
           <div className={`live-counter ${!running ? "counter-idle" : ""}`}>
             <strong>{count}</strong>

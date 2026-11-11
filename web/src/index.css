@@ -436,6 +436,28 @@ main.with-expanded-terminal {
   letter-spacing: 0.04em;
 }
 
+/* Animação Lottie (idle/working) dentro do slot — ocupa o centro do slot,
+   com as órbitas e dots do design como ambiente. */
+.lottie-anim {
+  width: 180px;
+  height: 180px;
+  position: relative;
+  z-index: 2;
+}
+
+/* Em "Parando", o ambiente também desacelera junto com o Lottie. */
+.is-stopping .orbit-one {
+  animation-duration: 12s;
+}
+
+.is-stopping .orbit-two {
+  animation-duration: 27s;
+}
+
+.is-stopping .robot-orb {
+  animation-duration: 5.4s;
+}
+
 .live-counter {
   display: flex;
   flex-direction: column;
