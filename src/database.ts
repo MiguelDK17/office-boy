@@ -232,6 +232,14 @@ export function listarCandidaturas(limite: number = 50): Candidatura[] {
   `).all(limite) as Candidatura[];
 }
 
+/** Candidaturas (reais e dry-run) registradas a partir de um timestamp local "YYYY-MM-DD HH:MM:SS". */
+export function contarCandidaturasDesde(tsLocal: string): number {
+  const row = db.prepare(`
+    SELECT COUNT(*) as total FROM candidaturas WHERE data_aplicacao >= ?
+  `).get(tsLocal) as { total: number };
+  return row.total;
+}
+
 export function registrarExecucao(totalCandidaturas: number, sitesProcessados: string[], erros: string[]): void {
   db.prepare(`
     INSERT INTO log_execucoes (total_candidaturas, sites_processados, erros)

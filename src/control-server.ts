@@ -20,12 +20,14 @@ import { spawn, type ChildProcess } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { log } from './logger.js';
-import { inicializarBanco } from './database.js';
+import { inicializarBanco, contarCandidaturasDesde, listarCandidaturas, obterEstatisticas } from './database.js';
 import { gerarHTML } from './dashboard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const MAX_LINHAS_LOG = 400;
+/** Clientes conectados no stream SSE /events. */
+const clientesSse = new Set<http.ServerResponse>();
 
 // Teto de iteracoes configurável na UI (PADRAO_MAX_ITERACOES = fallback do .env,
 // 500 quando o .env não define; clamp: 1 evita run de 0 iteracoes, teto de
@@ -41,6 +43,7 @@ function saneiaMaxIteracoes(valor: unknown): number {
 
 interface EstadoRun {
   rodando: boolean;
+  parando: boolean;
   pid: number | null;
   iniciadoEm: string | null;
   encerradoEm: string | null;
@@ -49,10 +52,14 @@ interface EstadoRun {
   origem: string | null;
   linhas: string[];
   ultimoCusto: number | null;
+  /** Progresso do loop do agente, extraído das linhas "Iteracao N/M". */
+  iteracaoAtual: number;
+  iteracaoTotal: number;
 }
 
 const estado: EstadoRun = {
   rodando: false,
+  parando: false,
   pid: null,
   iniciadoEm: null,
   encerradoEm: null,
@@ -61,6 +68,8 @@ const estado: EstadoRun = {
   origem: null,
   linhas: [],
   ultimoCusto: null,
+  iteracaoAtual: 0,
+  iteracaoTotal: 0,
 };
 
 let processo: ChildProcess | null = null;
@@ -87,6 +96,65 @@ function registrarLinha(linha: string): void {
     const v = parseFloat(m[1]);
     if (!Number.isNaN(v)) estado.ultimoCusto = v;
   }
+  // Progresso do loop do agente ("Iteracao 12/500") — alimenta o contador da
+  // run na UI sem tocar na lógica do bot.
+  const it = limpa.match(/Iteracao (\d+)\/(\d+)/);
+  if (it) {
+    const atual = parseInt(it[1], 10);
+    const total = parseInt(it[2], 10);
+    if (Number.isFinite(atual) && Number.isFinite(total) && (atual !== estado.iteracaoAtual || total !== estado.iteracaoTotal)) {
+      estado.iteracaoAtual = atual;
+      estado.iteracaoTotal = total;
+      emitirSse('progresso', {
+        iteracaoAtual: estado.iteracaoAtual,
+        iteracaoTotal: estado.iteracaoTotal,
+        candidaturasDaRun: contarCandidaturasDaRun(),
+      });
+    }
+  }
+  emitirSse('log', { linha: limpa });
+}
+
+// ========== SSE (/events) ==========
+//
+// Tempo real para a UI nova (React): log ao vivo, progresso da run e
+// mudanças de estado — sem polling e sem alterar a lógica do bot.
+// Formato: `event: <nome>\ndata: <json>\n\n`.
+
+function emitirSse(evento: string, dados: unknown): void {
+  if (clientesSse.size === 0) return;
+  const payload = `event: ${evento}\ndata: ${JSON.stringify(dados)}\n\n`;
+  for (const cliente of clientesSse) {
+    try {
+      cliente.write(payload);
+    } catch {
+      // Cliente morto: o handler de 'close' o remove em seguida.
+      clientesSse.delete(cliente);
+    }
+  }
+}
+
+function broadcastEstado(): void {
+  emitirSse('estado', {
+    rodando: estado.rodando,
+    parando: estado.parando,
+    pid: estado.pid,
+    iniciadoEm: estado.iniciadoEm,
+    encerradoEm: estado.encerradoEm,
+    codigoSaida: estado.codigoSaida,
+    dryRun: estado.dryRun,
+    ultimoCusto: estado.ultimoCusto,
+    iteracaoAtual: estado.iteracaoAtual,
+    iteracaoTotal: estado.iteracaoTotal,
+  });
+}
+
+/** Candidaturas registradas no banco desde o início do run (inclui dry-run). */
+function contarCandidaturasDaRun(): number {
+  if (!estado.iniciadoEm) return 0;
+  return contarCandidaturasDesde(
+    new Date(estado.iniciadoEm).toLocaleString('sv-SE').replace('T', ' '),
+  );
 }
 
 /**
@@ -116,12 +184,15 @@ export async function iniciarRun(
   const limiteIteracoes = saneiaMaxIteracoes(maxIteracoes);
 
   estado.rodando = true;
+  estado.parando = false;
   estado.pid = null;
   estado.iniciadoEm = new Date().toISOString();
   estado.encerradoEm = null;
   estado.codigoSaida = null;
   estado.ultimoCusto = null;
   estado.origem = 'ui';
+  estado.iteracaoAtual = 0;
+  estado.iteracaoTotal = limiteIteracoes;
 
   // O filho NÃO sobe dashboard (esta porta já é do control server) e roda em
   // modo agente normal. MAX_ITERACOES sobrescreve o .env — tem precedência
@@ -136,6 +207,7 @@ export async function iniciarRun(
 
   registrarLinha(`[control] iniciando bot (dry-run=${usarDryRun}, iteracoes<=${limiteIteracoes}) — ${command} ${args.join(' ')}`);
   log('INFO', `Control: iniciando bot (dry-run=${usarDryRun}, max ${limiteIteracoes} iteracoes)`);
+  broadcastEstado();
 
   processo = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   estado.pid = processo.pid ?? null;
@@ -149,17 +221,21 @@ export async function iniciarRun(
 
   processo.on('exit', (code) => {
     estado.rodando = false;
+    estado.parando = false;
     estado.codigoSaida = code;
     estado.encerradoEm = new Date().toISOString();
     estado.pid = null;
     registrarLinha(`[control] bot encerrado (codigo ${code})`);
     log('INFO', `Control: bot encerrado (código ${code})`);
+    broadcastEstado();
   });
 
   processo.on('error', (err) => {
     estado.rodando = false;
+    estado.parando = false;
     registrarLinha(`[control] erro ao iniciar bot: ${err.message}`);
     log('ERRO', `Control: erro ao iniciar bot — ${err.message}`);
+    broadcastEstado();
   });
 
   return { ok: true, maxIteracoes: limiteIteracoes };
@@ -168,13 +244,16 @@ export async function iniciarRun(
 /** Para o processo do bot (SIGTERM) se estiver rodando. */
 export function pararRun(): boolean {
   if (!estado.rodando || !processo) return false;
+  estado.parando = true;
   registrarLinha('[control] parada solicitada (SIGTERM)');
   try {
     processo.kill('SIGTERM');
   } catch (err) {
+    estado.parando = false;
     registrarLinha(`[control] falha ao parar: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
+  broadcastEstado();
   return true;
 }
 
@@ -283,9 +362,113 @@ export function iniciarControlServer(port: number, host: string): void {
       return;
     }
 
+    if (caminho === '/events') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      // Snapshot inicial: a UI monta a tela na hora, sem esperar o primeiro log.
+      res.write(`event: snapshot\ndata: ${JSON.stringify({
+        rodando: estado.rodando,
+        parando: estado.parando,
+        iniciadoEm: estado.iniciadoEm,
+        encerradoEm: estado.encerradoEm,
+        codigoSaida: estado.codigoSaida,
+        dryRun: estado.dryRun,
+        ultimoCusto: estado.ultimoCusto,
+        iteracaoAtual: estado.iteracaoAtual,
+        iteracaoTotal: estado.iteracaoTotal,
+        maxIteracoesPadrao: PADRAO_MAX_ITERACOES,
+        linhas: estado.linhas.slice(-200),
+        candidaturasDaRun: contarCandidaturasDaRun(),
+      })}\n\n`);
+      clientesSse.add(res);
+      req.on('close', () => clientesSse.delete(res));
+      return;
+    }
+
+    if (caminho === '/api/data') {
+      const stats = obterEstatisticas();
+      // Funil de resultados — mesma semântica do dashboard legado: o
+      // denominador honesto são as candidaturas com desfecho conhecido.
+      const cont = (r: string) => stats.porResultado.find(x => x.resultado === r)?.total ?? 0;
+      const totalCandidaturas = stats.porResultado.reduce((acc, x) => acc + x.total, 0);
+      const comDesfecho = stats.porResultado
+        .filter(x => x.resultado !== 'aguardando')
+        .reduce((acc, x) => acc + x.total, 0);
+      const respondidas = comDesfecho - cont('sem_resposta');
+      const entrevistas = cont('entrevista') + cont('oferta');
+      const ofertas = cont('oferta');
+      const pct = (n: number) => (totalCandidaturas > 0 ? Math.round((n / totalCandidaturas) * 1000) / 10 : 0);
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        hoje: { total: stats.hoje.total, scoreMedio: stats.hoje.score_medio },
+        total: stats.total,
+        porPlataforma: stats.porPlataforma,
+        porStatus: stats.porStatus,
+        funil: {
+          enviadas: totalCandidaturas,
+          respondidas,
+          respondidasPercentual: comDesfecho > 0 ? Math.round((respondidas / comDesfecho) * 1000) / 10 : null,
+          entrevistas,
+          ofertas,
+          comDesfecho,
+          taxaResposta: comDesfecho > 0 ? Math.round(((respondidas) / comDesfecho) * 1000) / 10 : null,
+        },
+        percentuais: {
+          enviadas: 100,
+          respondidas: pct(respondidas),
+          entrevistas: pct(entrevistas),
+          ofertas: pct(ofertas),
+        },
+        candidaturas: listarCandidaturas(20).map(c => ({
+          id: c.id,
+          empresa: c.empresa,
+          tituloVaga: c.titulo_vaga,
+          plataforma: c.plataforma,
+          url: c.url,
+          dataAplicacao: c.data_aplicacao,
+          score: c.score,
+          status: c.status,
+          resultado: c.resultado ?? 'aguardando',
+        })),
+        run: {
+          rodando: estado.rodando,
+          parando: estado.parando,
+          dryRun: estado.dryRun,
+          iniciadoEm: estado.iniciadoEm,
+          iteracaoAtual: estado.iteracaoAtual,
+          iteracaoTotal: estado.iteracaoTotal,
+          candidaturasDaRun: contarCandidaturasDaRun(),
+          ultimoCusto: estado.ultimoCusto,
+        },
+      }));
+      return;
+    }
+
+    if (caminho === '/legacy') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(
+        gerarHTML({
+          ativo: true,
+          rodando: estado.rodando,
+          dryRun: estado.dryRun,
+          novncUrl: urlDoNoVnc(req),
+        }),
+      );
+      return;
+    }
+
     if (caminho === '/api/status') {
       responderJSON(res, 200, {
         rodando: estado.rodando,
+        parando: estado.parando,
         pid: estado.pid,
         iniciadoEm: estado.iniciadoEm,
         encerradoEm: estado.encerradoEm,
@@ -293,6 +476,8 @@ export function iniciarControlServer(port: number, host: string): void {
         dryRun: estado.dryRun,
         ultimoCusto: estado.ultimoCusto,
         linhas: estado.linhas.length,
+        iteracaoAtual: estado.iteracaoAtual,
+        iteracaoTotal: estado.iteracaoTotal,
         // Padrão de iterações (do .env) — usado para pré-preencher o campo na UI.
         maxIteracoesPadrao: PADRAO_MAX_ITERACOES,
         navegador: await consultarNavegador(),
@@ -358,6 +543,18 @@ export function iniciarControlServer(port: number, host: string): void {
   srv.listen(port, host, () => {
     log('INFO', `Control server em http://${host}:${port} (UI — o bot só roda quando você pedir)`);
   });
+
+  // Heartbeat do SSE: mantém o stream vivo através de proxies e detecta
+  // clientes mortos (o write em um socket fechado lança → remoção).
+  setInterval(() => {
+    for (const cliente of clientesSse) {
+      try {
+        cliente.write(': ping\n\n');
+      } catch {
+        clientesSse.delete(cliente);
+      }
+    }
+  }, 20_000).unref();
 
   // Ao encerrar o container, o processo filho não pode ficar órfão.
   for (const sinal of ['SIGTERM', 'SIGINT'] as const) {
