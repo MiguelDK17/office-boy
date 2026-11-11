@@ -1,5 +1,6 @@
 # Build context enxuto: nada pessoal ou gerado vai para a imagem.
 node_modules/
+web/node_modules/
 dist/
 .git/
 .env

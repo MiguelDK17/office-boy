@@ -11,10 +11,17 @@ na porta 1717 (mesma porta da API). O dashboard antigo continua em `/legacy`.
 npm run dev:all        # backend em 1717 + front em http://localhost:5173
                        # (o Vite faz proxy de /api e /events para a 1717)
 
-# Produção (build + servido pelo Node na 1717):
+# Produção (build + servido pelo Node):
 npm run web:build      # gera web/dist
-npm run ui             # sobe o control server servindo o build em http://localhost:1717
+npm run ui             # control server servindo o build em http://localhost:1717
+                       # (porta vem de BOT_UI_PORT; fallback 1717 — no Docker é
+                       #  DASHBOARD_PORT=1717 dentro do container, mapeada como 1717:3000)
 ```
+
+> Em desenvolvimento o front fica em **5173** (servidor do Vite, com hot reload)
+> e o backend na **1717** — o proxy de `/api` e `/events` no `vite.config.ts`
+> conecta os dois, então tudo acontece na mesma origem do ponto de vista do
+> navegador. Para trocar a porta do backend, ajuste `OFFICEBOY_BACKEND_URL`.
 
 ## Trocar os Lotties
 
