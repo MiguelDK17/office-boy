@@ -75,6 +75,8 @@ export interface AgenteConfig {
   cdpEndpoint: string;
   limiteDiario: number;
   maxPorExecucao: number;
+  // Teto de iterações do loop do agente por run (padrão 100; ajustável na UI).
+  maxIteracoes: number;
   delayMin: number;
   delayMax: number;
   dryRun: boolean;

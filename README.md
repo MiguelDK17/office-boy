@@ -176,7 +176,7 @@ Os dois modos de navegador:
 
 `./bin/officeboy up` (sem flag) **detecta sozinho**: se houver um Chrome com CDP na `BOT_CDP_PORT`, usa o do host; senão sobe o do container — nunca fica sem navegador.
 
-**Modo UI (padrão no Docker):** o container sobe **só o dashboard** — o agente **não** roda sozinho (zero cota gasta até você pedir). Em `http://localhost:1717` você tem os botões **▶ Iniciar bot** / **⏹ Parar**, o checkbox de dry-run e o log ao vivo. O run acontece em um processo filho, então dá para parar no meio.
+**Modo UI (padrão no Docker):** o container sobe **só o dashboard** — o agente **não** roda sozinho (zero cota gasta até você pedir). Em `http://localhost:1717` você tem os botões **▶ Iniciar bot** / **⏹ Parar**, o checkbox de dry-run, o campo **interações por run** (teto de iterações do agente neste run, controlável a cada início; se ficar vazio, usa o padrão de `MAX_ITERACOES` — default 500 — e o teto rígido é 5000) e o log ao vivo. O run acontece em um processo filho, então dá para parar no meio.
 
 **Modo automático (opcional):** `CONTROL_MODE=false` no `.env` volta ao comportamento antigo — o agente roda assim que o container sobe (útil para cron).
 
@@ -257,6 +257,7 @@ Detalhes que importam:
 | `DASHBOARD_HOST` | Bind do dashboard (`0.0.0.0` no Docker p/ port-mapping) | `127.0.0.1` |
 | `LIMITE_DIARIO` | Max candidaturas por dia | `10` |
 | `MAX_POR_EXECUCAO` | Teto de envios reais por execução (anti-rajada) | `5` |
+| `MAX_ITERACOES` | Teto de iterações do loop do agente por run (cada uma ≈ 1 chamada do LLM; ajustável também no campo "interações" da UI, por run). Teto rígido de segurança: 5000 (guarda contra run infinito) | `500` |
 | `DELAY_MIN` | Delay mínimo entre ações (ms) | `2000` |
 | `DELAY_MAX` | Delay máximo entre ações (ms) | `5000` |
 | `SCORE_MINIMO` | Score mínimo para aplicar (1-10) | `6` |

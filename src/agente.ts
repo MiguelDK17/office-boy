@@ -13,7 +13,17 @@ import { perfilParaSystemPrompt } from './anonimizacao.js';
 import type { AgenteConfig, Perfil, SitesConfig } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MAX_ITERACOES = 100;
+// Teto de iterações do loop agora é configurável (AgenteConfig.maxIteracoes,
+// via MAX_ITERACOES no .env ou campo na UI do control server). Este valor é só
+// o fallback quando a config não vier preenchida.
+const MAX_ITERACOES_PADRAO = 100;
+
+/** Resolve o teto de iteracoes: valor da config saneado, com fallback seguro. */
+function obterMaxIteracoes(config: AgenteConfig): number {
+  const v = Number(config.maxIteracoes);
+  if (!Number.isFinite(v) || v < 1) return MAX_ITERACOES_PADRAO;
+  return Math.floor(Math.min(v, 5000));
+}
 // Sliding window: mantém só as últimas N mensagens no histórico.
 // Mensagens antigas (vagas já processadas, snapshots antigos) são descartadas
 // para evitar estouro de contexto, custo excessivo e degradação de qualidade.
@@ -390,6 +400,7 @@ export async function executarAgente(
 
   log('AGENTE', `Iniciando com ${sitesAtivos.length} site(s) ativo(s)`);
   log('AGENTE', `Limite diario: ${config.limiteDiario} candidaturas`);
+  log('AGENTE', `Limites de iteracao: ${obterMaxIteracoes(config)} (custo max: ${config.custoMaxUsd > 0 ? `$${config.custoMaxUsd.toFixed(2)}` : 'off'})`);
   log('AGENTE', `LLM: ${config.agentLlmModel} via ${config.agentLlmBaseUrl}`);
 
   // Descobre as tools do Playwright MCP UMA vez e converte para o padrão
@@ -438,9 +449,11 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
   let errosConsecutivos = 0;
   let saiuComErroFatal = false;
 
-  while (iteracao < MAX_ITERACOES) {
+  const maxIter = obterMaxIteracoes(config);
+
+  while (iteracao < maxIter) {
     iteracao++;
-    log('AGENTE', `Iteracao ${iteracao}/${MAX_ITERACOES}`);
+    log('AGENTE', `Iteracao ${iteracao}/${maxIter}`);
 
     try {
       const completion = await client.chat.completions.create({
@@ -681,8 +694,8 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
     }
   }
 
-  if (iteracao >= MAX_ITERACOES) {
-    respostaFinal = `Agente atingiu o limite maximo de ${MAX_ITERACOES} iteracoes.`;
+  if (iteracao >= maxIter) {
+    respostaFinal = `Agente atingiu o limite maximo de ${maxIter} iteracoes.`;
   }
 
   // Só limpa o recovery se NÃO saímos por erro fatal — assim o aviso de

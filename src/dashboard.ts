@@ -247,6 +247,10 @@ function gerarPainelControle(controle: ControleUI): string {
     <label class="label">
       <input type="checkbox" id="chkDryRun" ${controle.dryRun ? 'checked' : ''}> dry-run (simula, não envia)
     </label>
+    <label class="label">
+      interações por run <input type="number" id="numIter" min="1" max="5000" step="10" placeholder="padrão do .env" style="width:76px; padding:7px 9px; border-radius:8px; border:1px solid var(--border); background:var(--surface-2); color:var(--text); font-size:14px;">
+      <span class="label" style="opacity:.65; font-size:11px;">deixa vazio para usar o padrão do .env (default 500)</span>
+    </label>
     <span class="chip ${controle.rodando ? 'on' : 'off'}" id="chipEstado">${controle.rodando ? 'RODANDO' : 'PARADO'}</span>
     <span class="label" id="infoCusto"></span>
   </div>
@@ -261,11 +265,39 @@ function gerarPainelControle(controle: ControleUI): string {
     const btnStart = document.getElementById('btnStart');
     const btnStop = document.getElementById('btnStop');
     const chkDry = document.getElementById('chkDryRun');
+    const numIter = document.getElementById('numIter');
     const logBox = document.getElementById('logBox');
     const infoCusto = document.getElementById('infoCusto');
     const infoBrowser = document.getElementById('infoBrowser');
     const aviso = document.getElementById('aviso');
     let ultimoRodando = ${controle.rodando ? 'true' : 'false'};
+    let padraoIterApplied = false;
+
+    // Campo de iterações: começa com o padrão do .env (via /api/status, default
+    // 500), depois o navegador lembra o último valor usado (localStorage) entre
+    // sessões.
+    async function aplicarPadraoIteracoes() {
+      if (padraoIterApplied) return;
+      try {
+        const s = await (await fetch('/api/status')).json();
+        const padrao = Number(s.maxIteracoesPadrao) || 500;
+        const salvo = parseInt(localStorage.getItem('officeboy-max-iter'), 10);
+        numIter.value = Number.isFinite(salvo) && salvo >= 1
+          ? Math.min(salvo, 5000)
+          : Math.min(padrao, 5000);
+      } catch (e) {
+        numIter.value = 500;
+      }
+      padraoIterApplied = true;
+    }
+
+    // Sanitização no cliente: sem valor válido, o padrão (500) entra no lugar —
+    // o servidor faz o mesmo saneamento (clamp 1..5000), então ambos concordam.
+    function obterIteracoesSelecionadas() {
+      const n = parseInt(numIter.value, 10);
+      if (!Number.isFinite(n) || n < 1) return 500;
+      return Math.min(n, 5000);
+    }
 
     // Tema: começa salvo, senão escuro (padrão).
     const btnTema = document.getElementById('btnTema');
@@ -305,7 +337,10 @@ function gerarPainelControle(controle: ControleUI): string {
 
     btnStart.addEventListener('click', async () => {
       btnStart.disabled = true;
-      const r = await post('/api/start', { dryRun: chkDry.checked });
+      const iter = obterIteracoesSelecionadas();
+      localStorage.setItem('officeboy-max-iter', String(iter));
+      numIter.value = iter;
+      const r = await post('/api/start', { dryRun: chkDry.checked, maxIteracoes: iter });
       if (!r.ok && r.mensagem) {
         // Ex.: navegador indisponível — mostra o motivo (evita run à toa).
         aviso.textContent = r.mensagem;
@@ -371,6 +406,7 @@ function gerarPainelControle(controle: ControleUI): string {
         logBox.textContent = 'erro ao consultar status: ' + e;
       }
     }
+    aplicarPadraoIteracoes();
     atualizar();
     setInterval(atualizar, 2000);
 

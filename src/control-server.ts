@@ -12,7 +12,7 @@
 //   GET  /             → dashboard (com painel de controle)
 //   GET  /api/status   → estado do run (rodando, pid, custo, dry-run)
 //   GET  /api/logs     → últimas linhas de log do run
-//   POST /api/start    → inicia o bot ({ dryRun?: boolean })
+//   POST /api/start    → inicia o bot ({ dryRun?: boolean, maxIteracoes?: number })
 //   POST /api/stop     → para o bot em andamento
 
 import http from 'http';
@@ -26,6 +26,18 @@ import { gerarHTML } from './dashboard.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const MAX_LINHAS_LOG = 400;
+
+// Teto de iteracoes configurável na UI (PADRAO_MAX_ITERACOES = fallback do .env,
+// 500 quando o .env não define; clamp: 1 evita run de 0 iteracoes, teto de
+// 5000 é a guarda intencional contra um run sem fim por engano).
+const PADRAO_MAX_ITERACOES = parseInt(process.env.MAX_ITERACOES || '500', 10) || 500;
+const MAX_ITERACOES_TETO = 5000;
+
+function saneiaMaxIteracoes(valor: unknown): number {
+  const n = Math.floor(Number(valor));
+  if (!Number.isFinite(n)) return PADRAO_MAX_ITERACOES;
+  return Math.min(Math.max(n, 1), MAX_ITERACOES_TETO);
+}
 
 interface EstadoRun {
   rodando: boolean;
@@ -85,7 +97,10 @@ function registrarLinha(linha: string): void {
  * container, o caso "navegador caiu" é exatamente o cenário que o watchdog
  * resolve — aqui recusamos o run com uma mensagem clara.
  */
-export async function iniciarRun(dryRun?: boolean): Promise<{ ok: boolean; motivo?: string }> {
+export async function iniciarRun(
+  dryRun?: boolean,
+  maxIteracoes?: number,
+): Promise<{ ok: boolean; motivo?: string; maxIteracoes?: number }> {
   if (estado.rodando) return { ok: false, motivo: 'Já existe um run em andamento' };
 
   const nav = await consultarNavegador();
@@ -98,6 +113,7 @@ export async function iniciarRun(dryRun?: boolean): Promise<{ ok: boolean; motiv
 
   const { command, args } = comandoDoBot();
   const usarDryRun = dryRun ?? (process.env.DRY_RUN === 'true');
+  const limiteIteracoes = saneiaMaxIteracoes(maxIteracoes);
 
   estado.rodando = true;
   estado.pid = null;
@@ -108,16 +124,18 @@ export async function iniciarRun(dryRun?: boolean): Promise<{ ok: boolean; motiv
   estado.origem = 'ui';
 
   // O filho NÃO sobe dashboard (esta porta já é do control server) e roda em
-  // modo agente normal.
+  // modo agente normal. MAX_ITERACOES sobrescreve o .env — tem precedência
+  // porque é o valor explicitamente escolhido na UI para ESTE run.
   const env = {
     ...process.env,
     DASHBOARD_ENABLED: 'false',
     CONTROL_MODE: 'false',
     DRY_RUN: String(usarDryRun),
+    MAX_ITERACOES: String(limiteIteracoes),
   };
 
-  registrarLinha(`[control] iniciando bot (dry-run=${usarDryRun}) — ${command} ${args.join(' ')}`);
-  log('INFO', `Control: iniciando bot (dry-run=${usarDryRun})`);
+  registrarLinha(`[control] iniciando bot (dry-run=${usarDryRun}, iteracoes<=${limiteIteracoes}) — ${command} ${args.join(' ')}`);
+  log('INFO', `Control: iniciando bot (dry-run=${usarDryRun}, max ${limiteIteracoes} iteracoes)`);
 
   processo = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   estado.pid = processo.pid ?? null;
@@ -144,7 +162,7 @@ export async function iniciarRun(dryRun?: boolean): Promise<{ ok: boolean; motiv
     log('ERRO', `Control: erro ao iniciar bot — ${err.message}`);
   });
 
-  return { ok: true };
+  return { ok: true, maxIteracoes: limiteIteracoes };
 }
 
 /** Para o processo do bot (SIGTERM) se estiver rodando. */
@@ -275,6 +293,8 @@ export function iniciarControlServer(port: number, host: string): void {
         dryRun: estado.dryRun,
         ultimoCusto: estado.ultimoCusto,
         linhas: estado.linhas.length,
+        // Padrão de iterações (do .env) — usado para pré-preencher o campo na UI.
+        maxIteracoesPadrao: PADRAO_MAX_ITERACOES,
         navegador: await consultarNavegador(),
       });
       return;
@@ -288,17 +308,22 @@ export function iniciarControlServer(port: number, host: string): void {
     if (caminho === '/api/start' && req.method === 'POST') {
       const corpo = await lerCorpo(req);
       let dryRun: boolean | undefined;
+      let maxIteracoes: number | undefined;
       try {
-        const parsed = JSON.parse(corpo || '{}') as { dryRun?: boolean };
+        const parsed = JSON.parse(corpo || '{}') as { dryRun?: boolean; maxIteracoes?: unknown };
         if (typeof parsed.dryRun === 'boolean') dryRun = parsed.dryRun;
+        if (parsed.maxIteracoes !== undefined && parsed.maxIteracoes !== null && parsed.maxIteracoes !== '') {
+          maxIteracoes = saneiaMaxIteracoes(parsed.maxIteracoes);
+        }
       } catch {
-        // corpo inválido: usa o padrão do .env
+        // corpo inválido: usa os padrões do .env
       }
-      const resultado = await iniciarRun(dryRun);
+      const resultado = await iniciarRun(dryRun, maxIteracoes);
       responderJSON(res, resultado.ok ? 200 : 409, {
         ok: resultado.ok,
         mensagem: resultado.ok ? 'Bot iniciado' : (resultado.motivo ?? 'Não foi possível iniciar'),
         rodando: estado.rodando,
+        maxIteracoes: resultado.maxIteracoes,
       });
       return;
     }

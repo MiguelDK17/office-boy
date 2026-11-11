@@ -48,6 +48,13 @@ function validarEnv(): AgenteConfig {
     cdpEndpoint: process.env.CDP_ENDPOINT || 'http://127.0.0.1:9222',
     limiteDiario: parseInt(process.env.LIMITE_DIARIO || '10', 10),
     maxPorExecucao: parseInt(process.env.MAX_POR_EXECUCAO || '5', 10),
+    // Teto de iterações do agente (o teto do loop). Await em valores absurdos:
+    // um número gigante faz o run rodar (e gastar) sem fim; um ≤0 é o mesmo que
+    // "nao executar". Clamp em 1..5000 como rede de segurança, tanto para o
+    // .env quanto para o valor vindo da UI (via control server).
+    // Default 500 quando o .env não define MAX_ITERACOES — alto o bastante
+    // para um run longo, mas sob o teto de 5000 (guarda contra run infinito).
+    maxIteracoes: Math.min(Math.max(parseInt(process.env.MAX_ITERACOES || '500', 10) || 500, 1), 5000),
     delayMin: parseInt(process.env.DELAY_MIN || '2000', 10),
     delayMax: parseInt(process.env.DELAY_MAX || '5000', 10),
     dryRun: process.env.DRY_RUN === 'true',
