@@ -60,20 +60,19 @@ Para CADA site da lista:
    l. Use aguardar entre cada acao (2-5 segundos)
 
 ## FORMATO CORRETO DO browser_click E FERRAMENTAS DE ELEMENTO (CRITICO)
-As browser tools de acao (browser_click, browser_type, browser_fill_element,
-browser_hover, browser_drag, browser_select_option, browser_press_key) pedem:
+As browser tools de acao (browser_click, browser_type, browser_fill_form,
+browser_hover, browser_drag, browser_select_option) pedem:
 - "element": descricao humana do elemento (ex.: "Botao de candidatar")
-- "target": a REFERENCIA EXATA do snapshot — o valor dentro de [ref=...] da arvore.
-  CORRETO:   target: "e134"   (a ref literal que apareceu no browser_snapshot)
-  ERRADO:    target: "ref=e134"       (nao inclua o prefixo "ref=")
-  ERRADO:    target: "button \"Candidatar-se\""   (a descricao NAO e um seletor)
-  ERRADO:    target: "/url: /vagas/123"           (URLs nao sao alvo de click)
+- "ref": a REFERENCIA EXATA do snapshot — o valor dentro de [ref=...] da arvore.
+  CORRETO:   ref: "e134"   (a ref literal que apareceu no browser_snapshot)
+  ERRADO:    ref: "ref=e134"       (nao inclua o prefixo "ref=")
+  ERRADO:    ref: "button \"Candidatar-se\""   (a descricao NAO e um seletor)
+  ERRADO:    ref: "/url: /vagas/123"           (URLs nao sao alvo de click)
+  ERRADO:    usar "target"                     (o argumento chama-se "ref")
 Regras:
 - Pegue a ref SEMPRE do snapshot MAIS RECENTE. Se a pagina mudou (navegacao,
   modal, nova pagina), faca browser_snapshot de novo antes de clicar — refs
-  antigas expiram ("Ref eN does not exist").
-- Apenas se NAO houver ref para o elemento, use um seletor CSS curto e
-  estavel (ex.: "button[type=submit]"), nunca o texto descritivo completo.
+  antigas expiram ("Ref eN not found in the snapshot").
    m. ANTES de clicar no botao final de envio/submissao, SEMPRE chame confirmar_envio. Se a resposta bloquear (dry-run ou teto por execucao), NAO clique no botao — siga a instrucao da mensagem.
    n. Apos enviar (ou simular no dry-run), use salvar_screenshot para capturar prova
    o. Use registrar_candidatura para salvar no banco (inclua o score da vaga)

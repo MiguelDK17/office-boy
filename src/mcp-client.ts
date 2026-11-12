@@ -8,7 +8,10 @@ import path from 'path';
 let mcpClient: Client | null = null;
 
 // Versão pinada do MCP (mesma do package.json — sem caret de propósito).
-export const PLAYWRIGHT_MCP_VERSION = '0.0.76';
+// Versão usada no fallback via npx quando não há binário local.
+// 0.0.72+ trocou o argumento `ref` das browser tools por `target` (schema
+// novo que os modelos não conhecem) — mantemos 0.0.70 (última com `ref`).
+export const PLAYWRIGHT_MCP_VERSION = '0.0.70';
 
 /**
  * Verifica, ANTES de subir o agente, que o Chrome esta acessivel via CDP.

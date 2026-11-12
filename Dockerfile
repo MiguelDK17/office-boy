@@ -27,8 +27,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Deps primeiro (cache de camada): rebuilds só refazem se package.json/yarn.lock mudar.
+# better-sqlite3 >=13 não publica binários pré-compilados: precisa compilar na
+# instalação. Instalamos python3/make/g++, rodamos o yarn install e removemos
+# as ferramentas NA MESMA camada (a imagem final não carrega o peso).
 COPY package.json yarn.lock ./
-RUN yarn install --frozen-lockfile
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+    && yarn install --frozen-lockfile \
+    && yarn cache clean \
+    && apt-get purge -y --auto-remove python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 RUN yarn build

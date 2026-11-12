@@ -30,7 +30,7 @@ describe('montarComandoMCP — binário local vs npx', () => {
       '--cdp-endpoint',
       'http://127.0.0.1:9222',
     ]);
-    expect(PLAYWRIGHT_MCP_VERSION).toBe('0.0.76');
+    expect(PLAYWRIGHT_MCP_VERSION).toBe('0.0.70');
   });
 
   it('resolve o binário do node_modules local sem override', () => {
