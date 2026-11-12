@@ -115,17 +115,24 @@ case "$MODO_CHROME" in
     export BOT_NAVEGADOR_ORIGEM="local"
     ;;
   remoto)
-    # Modo remoto: exige o Chrome externo (CDP de $CDP_ENDPOINT).
+    # Modo remoto: EXIGE o Chrome externo (CDP de $CDP_ENDPOINT).
+    # POLÍTICA: o container NÃO inicia sem navegador — se o Chrome do host
+    # não estiver de pé, sai com erro e o restart policy (unless-stopped)
+    # tenta de novo. Nada de fallback silencioso para o Chrome local:
+    # o bot nunca trabalha numa janela que o usuário não está vendo.
     echo "[entrypoint] usando o Chrome EXTERNO (CDP: $CDP_ENDPOINT) — sem Chrome local"
-    echo "[entrypoint] aguardando CDP externo por 20s..."
-    for i in $(seq 1 20); do
+    echo "[entrypoint] aguardando CDP externo por 30s..."
+    for i in $(seq 1 30); do
       cdp_responde && break
+      if [ "$i" -eq 30 ]; then
+        echo "[entrypoint] ERRO: Chrome externo nao respondeu em 30s ($CDP_ENDPOINT)"
+        echo "[entrypoint] O bot NAO inicia sem navegador. Abra o Chrome do host com:"
+        echo "[entrypoint]   ./bin/officeboy chrome"
+        echo "[entrypoint] (o container reinicia sozinho e tenta de novo — restart: unless-stopped)"
+        exit 1
+      fi
       sleep 1
     done
-    if ! cdp_responde; then
-      echo "[entrypoint] ERRO: Chrome externo nao respondeu em 20s ($CDP_ENDPOINT)"
-      exit 1
-    fi
     echo "[entrypoint] Chrome externo conectado"
     export BOT_NAVEGADOR_ORIGEM="externo"
     ;;

@@ -40,8 +40,11 @@ services:
   # ---- Padrão: usa o Chrome do HOST (janela real, teclado real) ------------
   # O container conversa com o Chrome da sua máquina via CDP
   # (network_mode: host → 127.0.0.1 é o mesmo host).
-  # Se o Chrome do host não estiver no ar, o entrypoint cai para o Chrome
-  # próprio do container (com noVNC) em vez de morrer.
+  #
+  # POLÍTICA: sem fallback para o Chrome interno. START_LOCAL_CHROME=false
+  # força o modo "remoto": se o Chrome do host não estiver de pé, o container
+  # encerra e o restart policy tenta de novo até ele aparecer. O bot NUNCA
+  # trabalha num navegador que o usuário não está vendo (janela virtual).
   #
   # Para abrir o Chrome do host:  ./bin/officeboy chrome
   bot:
@@ -54,8 +57,8 @@ services:
       DASHBOARD_PORT: "${BOT_UI_PORT:-1717}"
       CONTROL_MODE: "true"
       CDP_ENDPOINT: "http://127.0.0.1:${BOT_CDP_PORT:-9222}"
-      # "auto": usa o Chrome do host; se ele não responder, sobe o local.
-      START_LOCAL_CHROME: "auto"
+      # false → exige o Chrome do host; sem ele o container não sobe.
+      START_LOCAL_CHROME: "false"
 
   # ---- Modo container: Chrome DENTRO do container (noVNC) -------------------
   # Sobe com: docker compose --profile container up -d bot-container
