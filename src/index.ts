@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { conectarPlaywrightMCP, desconectarMCP, verificarChromeCDP } from './mcp-client.js';
+import { conectarPlaywrightMCP, desconectarMCP, limparAbasCDP, verificarChromeCDP } from './mcp-client.js';
 import { inicializarBanco, fecharBanco, registrarExecucao, contarCandidaturasHoje, listarCandidaturas, obterEstatisticas } from './database.js';
 import { executarAgente } from './agente.js';
 import { iniciarDashboard, pararDashboard } from './dashboard.js';
@@ -192,6 +192,10 @@ async function executarFluxoPrincipal(config: AgenteConfig): Promise<void> {
 
   // Cleanup
   await desconectarMCP();
+  // Fecha as abas em excesso deixadas pelo run, preservando uma (se fechar
+  // todas pelo navegador o Chrome sai inteiro — ver TOOLS_MCP_BLOQUEADAS).
+  const abasFechadas = await limparAbasCDP(config.cdpEndpoint);
+  if (abasFechadas > 0) log('INFO', `Limpeza: ${abasFechadas} aba(s) fechada(s) (1 preservada para o proximo run)`);
   fecharBanco();
   log('INFO', 'Agente finalizado com sucesso.');
 }

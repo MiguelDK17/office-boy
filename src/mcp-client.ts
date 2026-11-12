@@ -93,6 +93,39 @@ export async function desconectarMCP(): Promise<void> {
   }
 }
 
+/**
+ * Limpeza de abas ao fim de um run, SEM encerrar o Chrome.
+ *
+ * Por que existe: o modelo costuma "arrumar a casa" no fim do run e fechar
+ * as abas que abriu. Como todas as abas da janela sao do bot (perfil
+ * dedicado), fechar a ultima ENCERRA O CHROME INTEIRO (exit 0, sem crash) —
+ * aconteceu 3x. As tools de fechamento ficam bloqueadas (TOOLS_MCP_BLOQUEADAS
+ * em agente.ts) e aqui nos fechamos as abas em excesso, deixando sempre UMA
+ * aba de trabalho aberta.
+ *
+ * Feito via HTTP do DevTools (/json/list + /json/close/<id>) — nao precisa
+ * do MCP e nao depende de versao dele. Ignora falhas: limpeza e best-effort.
+ */
+export async function limparAbasCDP(cdpEndpoint: string): Promise<number> {
+  let fechadas = 0;
+  try {
+    const base = cdpEndpoint.replace(/\/+$/, '');
+    const resp = await fetch(`${base}/json/list`);
+    if (!resp.ok) return 0;
+    const abas = (await resp.json()) as Array<{ id: string; type: string; url: string }>;
+    const paginas = abas.filter(a => a.type === 'page');
+    if (paginas.length <= 1) return 0;
+    // Mantem a ultima aba de trabalho (a mais recente); descarta o resto.
+    for (const aba of paginas.slice(0, -1)) {
+      try {
+        await fetch(`${base}/json/close/${aba.id}`);
+        fechadas++;
+      } catch { /* best-effort por aba */ }
+    }
+  } catch { /* CDP indisponivel: nada a fazer */ }
+  return fechadas;
+}
+
 export function getMCPClient(): Client {
   if (!mcpClient) {
     throw new Error('MCP Client nao inicializado. Chame conectarPlaywrightMCP() primeiro.');

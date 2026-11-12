@@ -86,6 +86,14 @@ Regras:
 - Continue ate: nao haver mais paginas, atingir o limite diario, ou nao encontrar mais vagas relevantes.
 - Maximo de 5 paginas por site para evitar loops infinitos.
 
+## REGRA CRITICA: NUNCA FECHE ABAS OU O NAVEGADOR
+- NUNCA chame browser_close nem browser_tabs com action "close".
+- O Chrome pertence ao usuario (janela real na tela dele). Fechar a ultima
+  aba ENCERRA O CHROME INTEIRO e o usuario perde a janela.
+- Ao terminar o fluxo, apenas informe o relatorio — deixe as abas abertas.
+- Navegue sempre na MESMA aba (browser_navigate muda a URL da aba atual);
+  nao abra novas abas nem troque de aba entre vagas.
+
 ## FILTRO OBRIGATORIO: pontuar_vaga
 Antes de se candidatar a QUALQUER vaga, SEMPRE use a tool "pontuar_vaga" passando os dados da vaga: tecnologias_pedidas, senioridade, localizacao, modelo_trabalho e, se a vaga mencionar exigencia de ingles, idioma_exigido.
 - A tool retorna: score (1-10), veredicto (APLICAR/PULAR), motivo e eliminatorios.
@@ -324,6 +332,21 @@ export function converterMcpToolParaOpenAI(
 }
 
 /**
+ * Tools MCP que fecham aba/navegador — BLOQUEADAS de propósito.
+ *
+ * O Chrome é do USUÁRIO (anexado via CDP, janela real na tela). Quando o
+ * agente fecha a última aba (`browser_close` ou `browser_tabs` com
+ * action "close"), o Chrome sai INTEIRO — exit 0, sem crash. Isso matou
+ * o navegador 3x no fim de runs (o modelo "arruma a casa" ao terminar e
+ * fecha a própria janela). O agente não tem por que fechar abas: deixamos
+ * todas abertas e a limpeza é feita por nós no fim do run (limparAbasCDP).
+ */
+export const TOOLS_MCP_BLOQUEADAS: ReadonlySet<string> = new Set([
+  'browser_close',
+  'browser_tabs',
+]);
+
+/**
  * Monta o array completo de `tools` no padrão oficial OpenAI
  * (`{ type: "function", ... }`): tools do navegador (MCP) + tools
  * customizadas do bot. É este array que vai em
@@ -332,7 +355,10 @@ export function converterMcpToolParaOpenAI(
 export function montarToolsAgente(
   mcpTools: McpToolInfo[],
 ): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  return [...mcpTools.map(converterMcpToolParaOpenAI), ...customTools];
+  return [
+    ...mcpTools.filter(t => !TOOLS_MCP_BLOQUEADAS.has(t.name)).map(converterMcpToolParaOpenAI),
+    ...customTools,
+  ];
 }
 
 // ========== RESILIÊNCIA A ERROS DE SELETOR ==========
@@ -572,7 +598,15 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
         // try/catch por tool: uma tool que lança NÃO derruba as demais nem o
         // agente — vira um resultado de erro que o modelo consegue tratar.
         try {
-          if (ehToolCustomizada(toolName)) {
+          if (TOOLS_MCP_BLOQUEADAS.has(toolName)) {
+            // O modelo pode alucinar uma tool bloqueada (nem está no array de
+            // tools que ele recebe). Responde com orientação em vez de executar:
+            // fechar aba/navegador encerraria o Chrome do usuário (janela real).
+            resultado =
+              'Tool bloqueada: este agente NAO fecha abas nem o navegador (browser_close/browser_tabs). ' +
+              'Deixe as abas abertas e siga o fluxo — para trocar de pagina use browser_navigate na mesma aba.';
+            log('AGENTE', `Tool ${toolName} bloqueada (protecao do Chrome do usuario)`);
+          } else if (ehToolCustomizada(toolName)) {
             resultado = await executarTool(toolName, toolArgs);
           } else {
             // Tool do Playwright MCP — executa via mcpClient

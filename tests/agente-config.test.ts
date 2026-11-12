@@ -113,6 +113,26 @@ describe('montarToolsAgente', () => {
     expect(tools.every((t) => t.type === 'function')).toBe(true);
     expect(tools[0].function.name).toBe('browser_navigate');
   });
+
+  it('bloqueia tools que fecham aba/navegador (browser_close, browser_tabs)', () => {
+    // Cenário: o MCP devolve as tools de fechamento — o Chrome é o do
+    // usuário (janela real) e fechar a última aba encerra o Chrome inteiro.
+    const mcp = [
+      { name: 'browser_navigate', description: 'n', inputSchema: { type: 'object', properties: {} } },
+      { name: 'browser_snapshot', description: 's', inputSchema: { type: 'object', properties: {} } },
+      { name: 'browser_close', description: 'c', inputSchema: { type: 'object', properties: {} } },
+      { name: 'browser_tabs', description: 't', inputSchema: { type: 'object', properties: {} } },
+    ];
+
+    const tools = montarToolsAgente(mcp);
+    const nomes = tools.map((t) => t.function.name);
+
+    // Validação: as de fechamento não chegam ao modelo; as demais permanecem.
+    expect(nomes).not.toContain('browser_close');
+    expect(nomes).not.toContain('browser_tabs');
+    expect(nomes).toContain('browser_navigate');
+    expect(nomes).toContain('browser_snapshot');
+  });
 });
 
 describe('customTools — formato OpenAI Function Calling', () => {
