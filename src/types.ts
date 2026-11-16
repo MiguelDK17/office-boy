@@ -87,6 +87,9 @@ export interface AgenteConfig {
   dashboardHost: string;
   // Circuito de parada por custo (0 = desativado)
   custoMaxUsd: number;
+  // Pausar o run automaticamente ao detectar página de login (default true).
+  // O processo fica vivo e a UI/Telegram avisam para o usuário logar no Chrome.
+  pausarEmLogin: boolean;
   // Telegram (opcional)
   telegramBotToken: string;
   telegramChatId: string;

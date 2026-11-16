@@ -19,7 +19,7 @@ export function inicializarLogger(): void {
   log('INFO', 'Logger inicializado');
 }
 
-export function log(nivel: 'INFO' | 'WARN' | 'ERRO' | 'TOOL' | 'AGENTE' | 'FALHA', mensagem: string): void {
+export function log(nivel: 'INFO' | 'WARN' | 'ERRO' | 'TOOL' | 'AGENTE' | 'FALHA' | 'SESSAO', mensagem: string): void {
   const timestamp = new Date().toISOString();
   const linha = `[${timestamp}] [${nivel}] ${mensagem}\n`;
 

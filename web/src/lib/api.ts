@@ -44,6 +44,16 @@ export async function pararBot(): Promise<void> {
   await fetch("/api/stop", { method: "POST" });
 }
 
+/** POST /api/pause — pausa na fronteira da iteração (processo vivo). */
+export async function pausarBot(): Promise<void> {
+  await fetch("/api/pause", { method: "POST" });
+}
+
+/** POST /api/resume — retoma um run pausado. */
+export async function retomarBot(): Promise<void> {
+  await fetch("/api/resume", { method: "POST" });
+}
+
 const LINHA = /^\[([^\]]+)\] \[(\w+)\]\s?(.*)$/;
 
 function nivelParaTone(nivel: string): LogTone {

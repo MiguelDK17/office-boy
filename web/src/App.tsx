@@ -12,6 +12,7 @@ import { MetricCard } from "./components/MetricCard";
 import { RobotVisual } from "./components/RobotVisual";
 import { StatusChip } from "./components/StatusChip";
 import { TerminalPanel } from "./components/TerminalPanel";
+import { prepararAudio, tocarSomPausa } from "./lib/som";
 import type { Candidatura } from "./lib/types";
 
 const runningMessages = [
@@ -48,6 +49,7 @@ function rotuloStatus(c: Candidatura): string {
 export default function App() {
   const {
     status,
+    motivoPausa,
     desconectado,
     dryRun: dryRunDoServidor,
     maxIteracoesPadrao,
@@ -59,6 +61,8 @@ export default function App() {
     erroIniciar,
     iniciar,
     parar,
+    pausar,
+    retomar,
   } = useBot();
 
   const [darkMode, setDarkMode] = useState(() => {
@@ -107,7 +111,9 @@ export default function App() {
   }, [dryRunIniciado, desconectado, dryRunDoServidor]);
 
   const running = status === "running";
+  const paused = status === "paused";
   const stopping = status === "stopping";
+  const pausaLogin = paused && motivoPausa === "login";
   const count = candidaturasDaRun;
   const totalIteracoes = iteracaoTotal || maxIteracoesPadrao;
   const progress = totalIteracoes > 0 ? (iteracaoAtual / totalIteracoes) * 100 : 0;
@@ -125,14 +131,28 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [running]);
 
+  // NOTIFICAÇÃO SONORA DA PAUSA: sempre que a run entra em "Pausado" (manual
+  // ou automática por login), toca o chime — o usuário pode estar longe da
+  // aba. O AudioContext é desbloqueado no primeiro clique (ver prepararAudio).
+  useEffect(() => {
+    if (paused) tocarSomPausa();
+  }, [paused]);
+
   async function toggleBot() {
-    if (running || stopping) {
+    prepararAudio(); // gesto do usuário: libera o áudio para os próximos avisos
+    if (running || paused || stopping) {
       await parar();
       return;
     }
     // Campo vazio = padrão do .env (null → backend usa MAX_ITERACOES).
     const n = parseInt(limit, 10);
     await iniciar(dryRun, Number.isFinite(n) && n >= 1 ? n : null);
+  }
+
+  async function alternarPausa() {
+    prepararAudio(); // idem — "Retomar" também é gesto válido
+    if (paused) await retomar();
+    else await pausar();
   }
 
   const funil = dados?.funil;
@@ -177,25 +197,33 @@ export default function App() {
             <h1 id="hero-title">
               {running
                 ? "Seu Office Boy está trabalhando"
-                : stopping
-                  ? "Encerrando a run..."
-                  : "Pronto para buscar oportunidades?"}
+                : pausaLogin
+                  ? "Seu Office Boy precisa de você"
+                  : paused
+                    ? "Seu Office Boy está pausado"
+                    : stopping
+                      ? "Encerrando a run..."
+                      : "Pronto para buscar oportunidades?"}
             </h1>
             <p
               className={running ? "running-message" : erroIniciar ? "error-message" : undefined}
-              key={running ? messageIndex : "stopped"}
+              key={running ? messageIndex : paused ? (pausaLogin ? "paused-login" : "paused") : "stopped"}
             >
               {running
                 ? runningMessages[messageIndex]
                 : erroIniciar
                   ? erroIniciar
-                  : stopping
-                    ? "Aguarde — o bot está finalizando a iteração atual."
-                    : "Inicie uma nova run e deixe o trabalho repetitivo com a gente."}
+                  : pausaLogin
+                    ? "Página de login detectada — a run pausou sozinha. Faça login no Chrome do bot e clique em Retomar para continuar."
+                    : paused
+                      ? "Tudo no lugar. Retome quando estiver pronto para continuar."
+                      : stopping
+                        ? "Aguarde — o bot está finalizando a iteração atual."
+                        : "Inicie uma nova run e deixe o trabalho repetitivo com a gente."}
             </p>
           </div>
 
-          <RobotVisual running={running} stopping={stopping} />
+          <RobotVisual running={running} stopping={stopping} paused={paused} />
 
           <div className={`live-counter ${!running ? "counter-idle" : ""}`}>
             <strong>{count}</strong>
@@ -214,14 +242,26 @@ export default function App() {
             </div>
           </div>
 
-          <button
-            className={`primary-button ${running || stopping ? "button-stop" : ""}`}
-            onClick={toggleBot}
-            disabled={stopping}
-          >
-            <Icon name={running || stopping ? "stop" : "play"} size={21} />
-            {stopping ? "Parando..." : running ? "Parar" : "Iniciar bot"}
-          </button>
+          <div className={running || paused ? "run-controls" : undefined}>
+            <button
+              className={`primary-button ${running || paused || stopping ? "button-stop" : ""}`}
+              onClick={toggleBot}
+              disabled={stopping}
+            >
+              <Icon name={running || paused || stopping ? "stop" : "play"} size={21} />
+              {stopping ? "Parando..." : running || paused ? "Parar" : "Iniciar bot"}
+            </button>
+            {(running || paused) && (
+              <button
+                className={`pause-button ${paused ? "resume-button" : ""}`}
+                onClick={alternarPausa}
+                aria-label={paused ? "Retomar run" : "Pausar run"}
+              >
+                <Icon name={paused ? "play" : "pause"} size={20} />
+                {paused ? "Retomar" : "Pausar"}
+              </button>
+            )}
+          </div>
 
           <div className="hero-options">
             <label className="switch-label">

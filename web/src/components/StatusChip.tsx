@@ -1,10 +1,11 @@
-// Chip de estado no cabeçalho — PARADO / RODANDO / PARANDO / SEM CONEXÃO.
+// Chip de estado no cabeçalho — PARADO / RODANDO / PAUSADO / PARANDO / SEM CONEXÃO.
 
 import type { BotState } from "../lib/types";
 
 const labels: Record<BotState, string> = {
   stopped: "PARADO",
   running: "RODANDO",
+  paused: "PAUSADO",
   stopping: "PARANDO",
   offline: "SEM CONEXÃO",
 };

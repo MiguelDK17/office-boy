@@ -1,5 +1,5 @@
-// Animação Lottie do robô: idle.json quando Parado, working.json quando
-// Rodando; em Parando a velocidade cai para 40% (transição suave).
+// Animação Lottie do robô: idle.json quando Parado (e Pausado — o robô "descansa"),
+// working.json quando Rodando; em Parando a velocidade cai para 40% (transição suave).
 //
 // TROCAR AS ANIMAÇÕES: substitua src/assets/idle.json e src/assets/working.json
 // pelos JSONs finais exportados do Lottie (mesmos nomes, nada mais muda).
@@ -12,14 +12,17 @@ import workingData from "../assets/working.json";
 export function LottieRobot({
   running,
   stopping,
+  paused,
 }: {
   running: boolean;
   stopping: boolean;
+  paused: boolean;
 }) {
+  const animando = running && !paused;
   return (
     <Lottie
       className="lottie-anim"
-      src={running ? workingData : idleData}
+      src={animando ? workingData : idleData}
       loop
       autoplay
       speed={stopping ? 0.4 : 1}

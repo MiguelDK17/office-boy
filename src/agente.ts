@@ -7,7 +7,7 @@ import { customTools, ehToolCustomizada, criarExecutorDeTools } from './tools.js
 import { podarHistorico, compactarHistorico, type HistoricoChat } from './historico.js';
 import { log } from './logger.js';
 import { classificarErroAPI, calcularBackoffRateLimit, MAX_TENTATIVAS, MAX_RATE_LIMIT_CONSECUTIVOS } from './erros.js';
-import { notificarErro } from './notificacoes.js';
+import { notificarErro, enviarTelegram } from './notificacoes.js';
 import { registrarUsoTokens, obterCustoTotal } from './token-tracker.js';
 import { perfilParaSystemPrompt } from './anonimizacao.js';
 import type { AgenteConfig, Perfil, SitesConfig } from './types.js';
@@ -366,28 +366,11 @@ export function montarToolsAgente(
 const PADRAO_ERRO_SELETOR =
   /selector|seletor|locator|strict mode|element.{0,30}not found|no.{0,20}element found|elemento n[aã]o encontrado|invalid selector|not attached|not visible|outside of the viewport/i;
 
-// Página de login: URL de autenticação + marcador textual. Os dois juntos
-// evitam falso positivo (ex.: um link "Sign in" solto na navegação de uma
-// página logada).
-const RE_URL_LOGIN =
-  /https?:\/\/[^\s)\]]*(?:\/login|\/signin|\/sign-in|\/checkpoint\/login|\/auth\/|\/accounts\/login|\/uas\/login)/i;
-const RE_MARCADOR_LOGIN =
-  /\b(sign in|log in|login|entrar|iniciar sess[aã]o|fazer login|entre com sua conta)\b/i;
-
-/**
- * Detecta se a tool devolveu uma PÁGINA DE LOGIN (sessão expirada ou
- * nunca logado).
- *
- * Por que existe: sem isso, o agente passa as 100 iterações tentando
- * "navegar" numa página de login —NAVEGAR de verdade, preencher formulário
- * de login, tirar screenshot — queimando cota sem qualquer progresso.
- * Com a detecção, o loop injeta a instrução de reportar `sessao_expirada`
- * (falha permanente) e o agente pula para o próximo site.
- */
-export function ehPaginaDeLogin(texto: string): boolean {
-  const janela = texto.slice(0, 2000);
-  return RE_URL_LOGIN.test(janela) && RE_MARCADOR_LOGIN.test(janela);
-}
+// Página de login + extração de texto MCP: movidos para src/sessao.ts
+// (módulo de sessão — guard com verificação + health check pré-run).
+// Re-exportados aqui para manter os imports existentes (e testes) funcionando.
+export { ehPaginaDeLogin, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js';
+import { ehPaginaDeLogin, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js';
 
 /**
  * Detecta se o resultado de uma tool indica falha de seletor/CSS ou elemento
@@ -399,29 +382,46 @@ export function ehErroDeSeletor(texto: string): boolean {
   return PADRAO_ERRO_SELETOR.test(texto);
 }
 
-/**
- * Extrai texto do retorno bruto de `mcpClient.callTool`, preservando o
- * payload intacto: partes `text` são concatenadas; partes não-texto viram
- * JSON. Retorna 'OK' quando não há conteúdo.
- */
-export function extrairTextoMcp(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return (
-      content
-        .map((c) => {
-          if (typeof c === 'string') return c;
-          if (c && typeof c === 'object' && 'type' in c) {
-            const part = c as { type: string; text?: unknown };
-            if (part.type === 'text' && part.text !== undefined) return String(part.text);
-          }
-          return JSON.stringify(c);
-        })
-        .join('\n') || 'OK'
-    );
-  }
-  if (content === null || content === undefined) return 'OK';
-  return JSON.stringify(content);
+// ========== PARADA SUAVE (stop cooperativo) ==========
+//
+// O control server envia SIGTERM ao processo quando o usuário pede "Parar
+// bot". Em vez de morrer no meio de uma iteração (com tool calls em
+// andamento, formulário preenchido pela metade etc.), o handler em
+// src/index.ts marca a parada aqui e o loop do agente encerra na PRÓXIMA
+// fronteira de iteração — a iteração atual termina por completo (chamada LLM
+// + tools + compactação de histórico) e sai pelo caminho normal (recovery
+// salvo, banco fechado, notificações enviadas).
+let paradaSolicitada = false;
+
+/** Marca a execução para parar na próxima fronteira de iteração (stop suave). */
+export function solicitarParadaAgente(): void {
+  paradaSolicitada = true;
+}
+
+/** Indica se já foi pedida a parada suave (uso do handler de sinais). */
+export function paradaAgenteSolicitada(): boolean {
+  return paradaSolicitada;
+}
+
+// Pausa real: o processo fica VIVO e o loop aguarda entre iterações — o
+// navegador e a sessão são preservados, e o botão "Retomar" faz o run
+// continuar de onde parou (sem recomeçar). Também só efetiva na fronteira de
+// iteração, como a parada suave.
+let pausaAtiva = false;
+
+/** Coloca a run em pausa na próxima fronteira de iteração. */
+export function solicitarPausaAgente(): void {
+  pausaAtiva = true;
+}
+
+/** Retoma a run pausada na próxima fronteira de iteração. */
+export function retomarAgente(): void {
+  pausaAtiva = false;
+}
+
+/** Indica se a run está (ou será) pausada. */
+export function pausaAgenteAtiva(): boolean {
+  return pausaAtiva;
 }
 
 export async function executarAgente(
@@ -484,15 +484,59 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
   const chamadasRepetidas = new Map<string, number>();
   // Quantas vezes o navegador devolveu página de login nesta execução.
   let paginasLogin = 0;
+  // Última URL pedida via browser_navigate — é para ela que o guard de login
+  // manda o agente voltar ao verificar a sessão (bounce de SSO vs. sessão morta).
+  let ultimaUrlNavegada: string | null = null;
 
   let iteracao = 0;
   let respostaFinal = '';
   let errosConsecutivos = 0;
   let saiuComErroFatal = false;
+  let anunciouPausa = false;
 
   const maxIter = obterMaxIteracoes(config);
 
+  // GUARDA ANTI-ABANDONO: modelos fracos (vários free no OpenRouter) encerram
+  // o run no meio respondendo só-texto — às vezes com texto degenerado em
+  // loop ("vou tentar novamente" ×9), às vezes com uma resposta de chat
+  // off-topic ("não posso ajudar com carreira..."). Sem tool calls, o loop
+  // antigo encerrava como "resposta final". Agora: cedo no run, a desistência
+  // é recusada — o controle volta ao modelo com um aviso `user`. Depois de
+  // MAX nudges (ou passado o limite de iterações), aceita-se como final.
+  const MAX_NUDGES_ABANDONO = 2;
+  const limiteGuardaAbandono = Math.min(Math.max(Math.floor(maxIter * 0.2), 5), 50);
+  let nudgesAbandono = 0;
+
   while (iteracao < maxIter) {
+    // Pausa real: aguarda aqui, com o processo vivo (navegador/sessão
+    // preservados), até a retomada — ou até um stop chegar, que tem
+    // precedência. Efetiva na fronteira da iteração: a atual termina
+    // por completo antes de o loop entrar em espera.
+    if (pausaAgenteAtiva() && !paradaSolicitada) {
+      if (!anunciouPausa) {
+        log('AGENTE', `Run pausada (apos ${iteracao} iteracoes). Aguardando retomada...`);
+        anunciouPausa = true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+      continue;
+    }
+    if (anunciouPausa) {
+      anunciouPausa = false;
+      log('AGENTE', 'Run retomada.');
+    }
+
+    // Stop suave: chegou pedido de parada? Encerra ANTES de abrir a próxima
+    // iteração — a anterior terminou por completo, então o recovery deste
+    // ponto está atualizado. `saiuComErroFatal` reutilizado de propósito:
+    // o efeito desejado é o mesmo (preservar o recovery, sem limpá-lo).
+    if (paradaSolicitada) {
+      log('AGENTE', `Parada suave solicitada (SIGTERM). Finalizando apos ${iteracao} iteracao(oes) — o progresso foi salvo.`);
+      salvarRecovery(iteracao, sitesAtivos.map(s => s.nome));
+      respostaFinal = `Execucao interrompida a pedido do usuario (parada suave) apos ${iteracao} iteracao(oes). As vagas ja vistas/aplicadas estao no banco e serao puladas na proxima execucao.`;
+      saiuComErroFatal = true;
+      break;
+    }
+
     iteracao++;
     log('AGENTE', `Iteracao ${iteracao}/${maxIter}`);
 
@@ -567,11 +611,34 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
       );
 
       if (!toolCalls || toolCalls.length === 0) {
-        // Sem tool calls = modelo terminou com texto
-        const textoFinal = message.content || '';
-        log('AGENTE', `Resposta final do modelo:\n${textoFinal}`);
-        respostaFinal = textoFinal;
-        limparRecovery();
+        // Sem tool calls = modelo respondeu só texto. Pode ser conclusão
+        // legítima OU abandono no meio do fluxo (guarda abaixo).
+        const textoModelo = message.content || '';
+        if (iteracao <= limiteGuardaAbandono && nudgesAbandono < MAX_NUDGES_ABANDONO) {
+          nudgesAbandono++;
+          log('AGENTE', `Guarda anti-abandono (${nudgesAbandono}/${MAX_NUDGES_ABANDONO}): resposta so-texto na iteracao ${iteracao}. Recusando a desistencia e devolvendo controle ao modelo.`);
+          log('AGENTE', `Texto recusado:\n${textoModelo.substring(0, 400)}`);
+          history.push({
+            role: 'user',
+            content:
+              'AVISO_DO_SISTEMA: voce respondeu APENAS TEXTO, sem nenhuma tool call. A execucao NAO terminou — ainda ha vagas e sites a processar. ' +
+              'Respostas conversacionais, desculpas ou planos ("vou tentar novamente...") NAO encerram o run. ' +
+              'Use as tools agora (browser_navigate, browser_snapshot, verificar_vaga_ja_vista, pontuar_vaga, fluxo de candidatura etc.) e continue o trabalho. ' +
+              'So responda em texto puro quando o fluxo realmente acabar.',
+          });
+          continue;
+        }
+        log('AGENTE', `Resposta final do modelo:\n${textoModelo}`);
+        respostaFinal = textoModelo;
+        // Se foi preciso nudgear para chegar aqui, quase certamente foi
+        // desistência (não conclusão) — preserva o recovery para a próxima
+        // execução tentar de novo, em vez de registrar como run completa.
+        if (nudgesAbandono > 0) {
+          salvarRecovery(iteracao, sitesAtivos.map(s => s.nome));
+          saiuComErroFatal = true;
+        } else {
+          limparRecovery();
+        }
         break;
       }
 
@@ -592,6 +659,12 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
           log('ERRO', `Argumentos invalidos para ${toolName}: ${(tc.function.arguments || '').substring(0, 100)}`);
         }
         log('TOOL', `${toolName}(${JSON.stringify(toolArgs).substring(0, 100)}...)`);
+
+        // Rastreia a última URL pedida — o guard de login usa para mandar o
+        // agente voltar exatamente à página que estava processando.
+        if (toolName === 'browser_navigate' && typeof toolArgs.url === 'string') {
+          ultimaUrlNavegada = toolArgs.url;
+        }
 
         let resultado: string;
 
@@ -638,18 +711,30 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
         }
 
         // Sessão expirada / nunca logado: o navegador caiu numa página de
-        // login. Guard determinístico — o prompt sozinho não bastou (o modelo
-        // gastava as 100 iterações tentando usar a página de login).
+        // login. Guard determinístico com VERIFICAÇÃO: em vez de mandar o
+        // modelo desistir na hora (ele pulava vagas que só precisavam do
+        // bounce automático de SSO — ex.: redirect signin → vaga da Gupy),
+        // pede o teste: re-navegar a URL alvo; só reporta `sessao_expirada`
+        // se cair no login DE NOVO. A partir de 3 páginas de login seguidas,
+        // a sessão é considerada quebrada e o aviso manda pular direto.
         if (ehPaginaDeLogin(resultado)) {
           paginasLogin++;
-          resultado +=
-            `\n\nAVISO_DO_SISTEMA: o navegador esta numa PAGINA DE LOGIN (sessao expirada ou nunca logado). ` +
-            `NAO tente preencher formularios nem clicar em campos de login. ` +
-            `Use reportar_falha com codigo "sessao_expirada" (url_vaga = URL atual) e PULE para o proximo site.`;
-          if (paginasLogin >= 3) {
-            resultado +=
-              ` ATENCAO: ${paginasLogin} paginas de login em sequencia — a sessao esta quebrada. ` +
-              `PULA o site agora (reportar_falha "sessao_expirada").`;
+          resultado += construirAvisoVerificacaoLogin(ultimaUrlNavegada, paginasLogin);
+
+          // PAUSA AUTOMÁTICA NO LOGIN: os portais deslogam o perfil para frear
+          // automação — iterar contra o muro só queima cota (LLM e risco de
+          // banimento). Em vez disso, a run PAUSA na fronteira desta iteração
+          // (processo vivo, navegador/sessão preservados), a UI toca o som e
+          // o Telegram avisa: o usuário loga manualmente no Chrome do bot e
+          // clica "Retomar" — a sessão volta e o run continua de onde parou.
+          if (config.pausarEmLogin) {
+            solicitarPausaAgente();
+            log('AGENTE', 'PAGINA DE LOGIN detectada — pausando o run automaticamente. Faca login no Chrome do bot e clique Retomar.');
+            await enviarTelegram(
+              '🟡 Página de login detectada\n' +
+              'O run foi PAUSADO automaticamente (a sessão pode ter expirado).\n' +
+              'Faça login manualmente no Chrome do bot e clique RETOMAR na UI.',
+            );
           }
         }
 

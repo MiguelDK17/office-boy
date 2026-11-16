@@ -99,4 +99,22 @@ describe('control-server — contrato da API', () => {
     expect(fonte).toContain("DASHBOARD_ENABLED: 'false'");
     expect(fonte).toContain("CONTROL_MODE: 'false'");
   });
+
+  it('expõe pause/resume (SIGUSR2/SIGWINCH ao filho) e propaga pausado no estado', () => {
+    // Cenário + Ação + Validação: endpoints da pausa real
+    expect(fonte).toContain("'/api/pause'");
+    expect(fonte).toContain("'/api/resume'");
+    expect(fonte).toContain("processo.kill('SIGUSR2')");
+    expect(fonte).toContain("processo.kill('SIGWINCH')");
+    expect(fonte).toContain('pausado: estado.pausado');
+  });
+
+  it('propaga o MOTIVO da pausa (login = automática) em todos os canais', () => {
+    // Cenário + Ação + Validação: a UI usa motivoPausa para a mensagem de login
+    expect(fonte).toContain("motivoPausa: 'login' | null");
+    expect(fonte).toMatch(/PAGINA DE LOGIN detectada/);
+    expect(fonte).toContain('motivoPausa: estado.motivoPausa');
+    // Retomada e fim de run limpam o motivo
+    expect(fonte).toMatch(/estado\.motivoPausa = null/);
+  });
 });

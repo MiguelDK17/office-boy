@@ -197,6 +197,17 @@
   background: #f59e0b;
 }
 
+/* Pausado: mesmo âmbar do design (chip estático, sem pulso). */
+.status-paused {
+  color: #b86f05;
+  border-color: rgba(245, 158, 11, 0.25);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.status-paused .status-dot {
+  background: #f59e0b;
+}
+
 /* Backend fora do ar: chip âmbar/vermelho discreto, coerente com a paleta. */
 .status-offline {
   color: #d97706;
@@ -458,6 +469,23 @@ main.with-expanded-terminal {
   animation-duration: 5.4s;
 }
 
+/* Em "Pausado", o ambiente fica âmbar (como no design) e o robô volta à
+   animação idle — mesma do estado parado, sem filtro sobre o Lottie. */
+.is-paused .orbit-one,
+.is-paused .orbit-two {
+  border-color: rgba(245, 158, 11, 0.24);
+}
+
+.is-paused .float-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 5px rgba(245, 158, 11, 0.09);
+}
+
+.is-paused .lottie-label {
+  color: #b86f05;
+  background: color-mix(in srgb, #f59e0b 10%, var(--surface-soft));
+}
+
 .live-counter {
   display: flex;
   flex-direction: column;
@@ -574,6 +602,44 @@ main.with-expanded-terminal {
   box-shadow:
     0 16px 34px rgba(239, 68, 68, 0.25),
     inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+/* Run ativa: Parar + Pausar lado a lado (grid do design). */
+.run-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 156px;
+  gap: 12px;
+}
+
+.pause-button {
+  height: 56px;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #b86f05;
+  background: color-mix(in srgb, #f59e0b 9%, var(--surface-solid));
+  box-shadow: 0 8px 20px rgba(180, 105, 5, 0.08);
+  font-size: 13px;
+  font-weight: 600;
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.pause-button:hover {
+  transform: translateY(-2px);
+  border-color: rgba(245, 158, 11, 0.55);
+  box-shadow: 0 12px 24px rgba(180, 105, 5, 0.14);
+}
+
+.pause-button.resume-button {
+  color: #07826c;
+  border-color: rgba(16, 185, 129, 0.3);
+  background: color-mix(in srgb, #10b981 9%, var(--surface-solid));
 }
 
 .hero-options {

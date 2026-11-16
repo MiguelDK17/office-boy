@@ -4,11 +4,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { conectarPlaywrightMCP, desconectarMCP, limparAbasCDP, verificarChromeCDP } from './mcp-client.js';
 import { inicializarBanco, fecharBanco, registrarExecucao, contarCandidaturasHoje, listarCandidaturas, obterEstatisticas } from './database.js';
-import { executarAgente } from './agente.js';
+import { executarAgente, solicitarParadaAgente, paradaAgenteSolicitada, solicitarPausaAgente, retomarAgente, pausaAgenteAtiva } from './agente.js';
 import { iniciarDashboard, pararDashboard } from './dashboard.js';
 import { iniciarControlServer } from './control-server.js';
 import { inicializarLogger, log } from './logger.js';
-import { configurarTelegram, notificarResumo, notificarErro } from './notificacoes.js';
+import { configurarTelegram, notificarResumo, notificarErro, enviarTelegram } from './notificacoes.js';
+import { verificarSessoes } from './sessao.js';
 import { configurarEmail, enviarRelatorioEmail, gerarHTMLRelatorio } from './email.js';
 import { iniciarCron, pararCron } from './cron.js';
 import { exibirResumoTokens, obterCustoTotal, obterTokensTotal, obterTotalChamadas, resetarTracker } from './token-tracker.js';
@@ -60,6 +61,8 @@ function validarEnv(): AgenteConfig {
     dryRun: process.env.DRY_RUN === 'true',
     scoreMinimo: parseInt(process.env.SCORE_MINIMO || '6', 10),
     custoMaxUsd: parseFloat(process.env.CUSTO_MAX_USD || '0'),
+    // Pausa automática no login: true por padrão (só roda com o usuário por perto).
+    pausarEmLogin: process.env.PAUSAR_EM_LOGIN !== 'false',
     dashboardPort: parseInt(process.env.DASHBOARD_PORT || '3000', 10),
     dashboardHost: process.env.DASHBOARD_HOST || '127.0.0.1',
     // Telegram
@@ -85,7 +88,68 @@ function validarEnv(): AgenteConfig {
   };
 }
 
+// ===== Parada suave (SIGTERM/SIGINT) =====
+//
+// "Parar bot" na UI envia SIGTERM ao processo; Ctrl+C envia SIGINT. Em vez de
+// morrer no meio de uma iteração (tool call em andamento, formulário pela
+// metade), o primeiro sinal marca o agente para parar na próxima fronteira de
+// iteração — a atual termina por completo e o processo sai pelo caminho
+// normal (recovery salvo, resumo, notificações, cleanup do MCP/banco).
+// Um SEGUNDO sinal encerra na hora (escape: iteracao travada).
+let fluxoEmAndamento = false;
+let sinaisDeParadaRecebidos = 0;
+
+function handlerParadaSuave(sinal: string): void {
+  // No modo control server, quem responde a SIGTERM/SIGINT é o próprio
+  // control server (encaminha ao filho e sai) — este handler é no-op aqui.
+  if (process.env.CONTROL_MODE === 'true') return;
+  sinaisDeParadaRecebidos++;
+  if (sinaisDeParadaRecebidos >= 2) {
+    log('WARN', `Recebido ${sinal} pela 2a vez. Encerrando imediatamente...`);
+    fecharBanco();
+    process.exit(0);
+  }
+  if (!fluxoEmAndamento) {
+    log('INFO', `Recebido ${sinal} sem execucao em andamento. Encerrando.`);
+    fecharBanco();
+    process.exit(0);
+  }
+  if (paradaAgenteSolicitada()) {
+    log('WARN', `Recebido ${sinal}, porem a parada suave ja estava marcada. Aguardando o fim da iteracao atual...`);
+    return;
+  }
+  log('WARN', `Recebido ${sinal}. Parada suave: finalizando a iteracao atual antes de sair (recovery sera salvo)...`);
+  solicitarParadaAgente();
+}
+
+// Pausa/retomada por sinais — escolha de sinais sem papel reservado no Node
+// (SIGUSR1 fica para o inspector; SIGHUP/SIGINT/SIGTERM já têm significado).
+// PAUSA = SIGUSR2 (control server envia em POST /api/pause)
+// RETOMA = SIGWINCH (control server envia em POST /api/resume)
+function handlerPausa(): void {
+  if (process.env.CONTROL_MODE === 'true' || !fluxoEmAndamento) return;
+  if (pausaAgenteAtiva()) return;
+  log('WARN', 'Pausa solicitada. A run sera pausada quando a iteracao atual terminar...');
+  solicitarPausaAgente();
+}
+
+function handlerRetomada(): void {
+  if (process.env.CONTROL_MODE === 'true' || !fluxoEmAndamento) return;
+  if (!pausaAgenteAtiva()) return;
+  log('INFO', 'Retomada solicitada. A run continua na proxima iteracao.');
+  retomarAgente();
+}
+
 async function executarFluxoPrincipal(config: AgenteConfig): Promise<void> {
+  fluxoEmAndamento = true;
+  try {
+    await executarFluxoInterno(config);
+  } finally {
+    fluxoEmAndamento = false;
+  }
+}
+
+async function executarFluxoInterno(config: AgenteConfig): Promise<void> {
   // Carrega configuracoes
   const perfil = carregarConfig<Perfil>('perfil.json');
   log('INFO', `Perfil carregado: ${perfil.nome} (${perfil.titulo_profissional})`);
@@ -125,6 +189,36 @@ async function executarFluxoPrincipal(config: AgenteConfig): Promise<void> {
     await notificarErro('Falha ao conectar ao Chrome. Verifique se o CDP esta ativo.');
     fecharBanco();
     process.exit(1);
+  }
+
+  // HEALTH CHECK DE SESSÃO PRÉ-RUN: entra na URL de busca de cada site ativo
+  // e classifica a sessão (ok / login_exigido / erro) ANTES da primeira
+  // chamada de LLM. Sessão morta descoberta aqui economiza um run inteiro de
+  // iterações queimadas contra o muro do login (o bot usa o MESMO Chrome via
+  // CDP, então o teste reflete exatamente a sessão que o agente vai usar).
+  const sessoes = await verificarSessoes(mcpClient, sites);
+  if (sessoes.length > 0) {
+    const quebradas = sessoes.filter((s) => s.status !== 'ok');
+    if (quebradas.length === 0) {
+      log('INFO', `Health check de sessao: ${sessoes.length} site(s) OK`);
+    } else {
+      const detalhes = quebradas.map((s) => `- ${s.site}: ${s.status} (${s.url})`).join('\n');
+      log('WARN', `Health check de sessao: ${quebradas.map((s) => `${s.site}=${s.status}`).join(', ')}`);
+      // Todos quebrados (e run real) → aborta antes de gastar LLM: sem login
+      // manual no Chrome do bot não há fluxo de candidatura possível.
+      const todosQuebrados = quebradas.length === sessoes.length;
+      await enviarTelegram(
+        todosQuebrados && !config.dryRun
+          ? `🟠 SESSAO EXPIRADA em todos os sites configurados\n${detalhes}\nRun NAO iniciado. Faca login manual no Chrome do bot e inicie novamente.`
+          : `🟠 ATENCAO DE SESSAO (antes do run)\n${detalhes}\nO run vai iniciar mesmo assim; estes sites podem exigir login manual no Chrome do bot.`,
+      );
+      if (todosQuebrados && !config.dryRun) {
+        log('WARN', 'Todos os sites com sessao quebrada — run abortado antes de gastar chamadas de LLM.');
+        await desconectarMCP();
+        fecharBanco();
+        return;
+      }
+    }
   }
 
   // Executa o agente
@@ -204,6 +298,15 @@ async function main() {
   // Inicializa logger antes de tudo
   inicializarLogger();
 
+  // Sinais de parada: SIGTERM (usado pelo control server em "Parar bot") e
+  // SIGINT (Ctrl+C). Registrados cedo para cobrir todos os modos (run único,
+  // cron e control server).
+  process.on('SIGTERM', () => handlerParadaSuave('SIGTERM'));
+  process.on('SIGINT', () => handlerParadaSuave('SIGINT'));
+  // Pausa real da run: SIGUSR2 pausa, SIGWINCH retoma (ver handlerPausa).
+  process.on('SIGUSR2', () => handlerPausa());
+  process.on('SIGWINCH', () => handlerRetomada());
+
   log('INFO', '='.repeat(60));
   log('INFO', '  OFFICE BOY - Agente Inteligente de Candidaturas');
   log('INFO', '='.repeat(60));
@@ -256,14 +359,9 @@ async function main() {
       return executarFluxoPrincipal(config);
     });
 
-    // Mantém o processo vivo
-    process.on('SIGINT', () => {
-      log('INFO', 'Recebido SIGINT. Parando cron...');
-      pararCron();
-      pararDashboard();
-      fecharBanco();
-      process.exit(0);
-    });
+    // Os sinais SIGINT/SIGTERM já estão registrados em main() — o handler
+    // trata tanto a parada suave de um run em andamento quanto o encerramento
+    // do cron sem run ativo (fluxoEmAndamento === false → sai direto).
   } else {
     // Execução única
     await executarFluxoPrincipal(config);

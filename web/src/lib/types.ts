@@ -1,12 +1,16 @@
 // Tipos compartilhados entre a camada de dados (lib/api.ts, hooks/useBot.ts)
 // e os componentes da UI.
 
-export type BotState = "stopped" | "running" | "stopping" | "offline";
+export type BotState = "stopped" | "running" | "paused" | "stopping" | "offline";
 
 /** Estado completo do run, como enviado no snapshot e nos eventos `estado` do SSE. */
 export interface EstadoRun {
   rodando: boolean;
   parando: boolean;
+  /** Run em pausa — processo vivo, aguardando "Retomar". */
+  pausado: boolean;
+  /** Motivo da pausa: 'login' = automática por página de login; null = manual. */
+  motivoPausa: "login" | null;
   iniciadoEm: string | null;
   encerradoEm: string | null;
   codigoSaida: number | null;
@@ -60,6 +64,8 @@ export interface ApiData {
   run: {
     rodando: boolean;
     parando: boolean;
+    pausado: boolean;
+    motivoPausa: "login" | null;
     dryRun: boolean;
     iniciadoEm: string | null;
     iteracaoAtual: number;

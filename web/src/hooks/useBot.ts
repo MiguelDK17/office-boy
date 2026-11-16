@@ -10,6 +10,8 @@ import {
   conectarEventos,
   iniciarBot,
   pararBot,
+  pausarBot,
+  retomarBot,
   parseLote,
 } from "../lib/api";
 import type {
@@ -24,8 +26,10 @@ import type {
 const MAX_LINHAS = 400;
 
 export interface UseBot {
-  /** idle/running/stopping — "offline" não é um estado do bot, é conexão. */
+  /** stopped/running/paused/stopping — "offline" não é um estado do bot, é conexão. */
   status: BotState;
+  /** Motivo da pausa atual ('login' = automática por página de login). */
+  motivoPausa: "login" | null;
   /** true quando o EventSource está fora do backend. */
   desconectado: boolean;
   dryRun: boolean;
@@ -41,11 +45,15 @@ export interface UseBot {
   erroIniciar: string | null;
   iniciar: (dryRun: boolean, maxIteracoes: number | null) => Promise<void>;
   parar: () => Promise<void>;
+  pausar: () => Promise<void>;
+  retomar: () => Promise<void>;
 }
 
 const estadoInicial: EstadoRun = {
   rodando: false,
   parando: false,
+  pausado: false,
+  motivoPausa: null,
   iniciadoEm: null,
   encerradoEm: null,
   codigoSaida: null,
@@ -100,6 +108,8 @@ export function useBot(): UseBot {
         setEstado({
           rodando: s.rodando,
           parando: s.parando,
+          pausado: s.pausado,
+          motivoPausa: s.motivoPausa,
           iniciadoEm: s.iniciadoEm,
           encerradoEm: s.encerradoEm,
           codigoSaida: s.codigoSaida,
@@ -161,16 +171,30 @@ export function useBot(): UseBot {
     // O estado "parando" chega pelo evento `estado` do SSE.
   }, []);
 
+  const pausar = useCallback(async () => {
+    await pausarBot();
+    // A confirmação "Run pausada" chega pelo SSE (log + estado).
+  }, []);
+
+  const retomar = useCallback(async () => {
+    await retomarBot();
+  }, []);
+
   const status: BotState = desconectado && estado.rodando
-    ? "running" // Mantém a run visível; o chip "SEM CONEXÃO" sinaliza o offline.
+    ? estado.pausado && !estado.parando
+      ? "paused" // Mantém a pausa visível; o chip "SEM CONEXÃO" sinaliza o offline.
+      : "running" // Mantém a run visível; o chip "SEM CONEXÃO" sinaliza o offline.
     : estado.parando
       ? "stopping"
       : estado.rodando
-        ? "running"
+        ? estado.pausado
+          ? "paused"
+          : "running"
         : "stopped";
 
   return {
     status,
+    motivoPausa: estado.motivoPausa,
     desconectado,
     dryRun: estado.dryRun,
     maxIteracoesPadrao,
@@ -183,5 +207,7 @@ export function useBot(): UseBot {
     erroIniciar,
     iniciar,
     parar,
+    pausar,
+    retomar,
   };
 }

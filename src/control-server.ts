@@ -65,6 +65,10 @@ function saneiaMaxIteracoes(valor: unknown): number {
 interface EstadoRun {
   rodando: boolean;
   parando: boolean;
+  /** Run em pausa (SIGUSR2 ao filho) — processo vivo, aguardando retomada. */
+  pausado: boolean;
+  /** Motivo da pausa: 'login' = automática por página de login; null = manual. */
+  motivoPausa: 'login' | null;
   pid: number | null;
   iniciadoEm: string | null;
   encerradoEm: string | null;
@@ -81,6 +85,8 @@ interface EstadoRun {
 const estado: EstadoRun = {
   rodando: false,
   parando: false,
+  pausado: false,
+  motivoPausa: null,
   pid: null,
   iniciadoEm: null,
   encerradoEm: null,
@@ -94,6 +100,16 @@ const estado: EstadoRun = {
 };
 
 let processo: ChildProcess | null = null;
+
+// Prazo para o bot encerrar após o SIGTERM (parada suave). Ele termina a
+// iteração atual antes de sair — isso pode levar alguns minutos (chamada LLM
+// + tool calls de navegador). Se estourar o prazo (iteração travada), escala
+// para SIGKILL. Ajustável via PARADA_GRACIOSA_TIMEOUT_MS.
+const PARADA_GRACIOSA_TIMEOUT_MS = (() => {
+  const n = parseInt(process.env.PARADA_GRACIOSA_TIMEOUT_MS || '300000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 300000;
+})();
+let prazoParadaGraciosa: NodeJS.Timeout | null = null;
 
 /** Comando para rodar o bot: build (dist) em produção, tsx em desenvolvimento. */
 function comandoDoBot(): { command: string; args: string[] } {
@@ -133,6 +149,23 @@ function registrarLinha(linha: string): void {
       });
     }
   }
+  // Confirmação de pausa/retomada vindas do próprio agente (o estado
+  // `pausado` é setado otimisticamente no POST e confirmado aqui).
+  // `motivoPausa` distingue a pausa manual ("Pausar" da UI) da pausa
+  // AUTOMÁTICA por página de login — a UI usa para mostrar a instrução
+  // "faça login no Chrome" e tocar o som de atenção.
+  if (/Run pausada/.test(limpa)) {
+    estado.pausado = true;
+    broadcastEstado();
+  } else if (/Run retomada/.test(limpa)) {
+    estado.pausado = false;
+    estado.motivoPausa = null;
+    broadcastEstado();
+  }
+  if (/PAGINA DE LOGIN detectada/.test(limpa)) {
+    estado.motivoPausa = 'login';
+    broadcastEstado();
+  }
   emitirSse('log', { linha: limpa });
 }
 
@@ -159,6 +192,8 @@ function broadcastEstado(): void {
   emitirSse('estado', {
     rodando: estado.rodando,
     parando: estado.parando,
+    pausado: estado.pausado,
+    motivoPausa: estado.motivoPausa,
     pid: estado.pid,
     iniciadoEm: estado.iniciadoEm,
     encerradoEm: estado.encerradoEm,
@@ -206,6 +241,8 @@ export async function iniciarRun(
 
   estado.rodando = true;
   estado.parando = false;
+  estado.pausado = false;
+  estado.motivoPausa = null;
   estado.dryRun = usarDryRun;
   estado.pid = null;
   estado.iniciadoEm = new Date().toISOString();
@@ -244,11 +281,17 @@ export async function iniciarRun(
   processo.on('exit', (code) => {
     estado.rodando = false;
     estado.parando = false;
+    estado.pausado = false;
+    estado.motivoPausa = null;
     estado.codigoSaida = code;
     estado.encerradoEm = new Date().toISOString();
     estado.pid = null;
     registrarLinha(`[control] bot encerrado (codigo ${code})`);
     log('INFO', `Control: bot encerrado (código ${code})`);
+    if (prazoParadaGraciosa) {
+      clearTimeout(prazoParadaGraciosa);
+      prazoParadaGraciosa = null;
+    }
     broadcastEstado();
   });
 
@@ -263,16 +306,79 @@ export async function iniciarRun(
   return { ok: true, maxIteracoes: limiteIteracoes };
 }
 
-/** Para o processo do bot (SIGTERM) se estiver rodando. */
+/**
+ * Para o bot em execução. O SIGTERM agora é tratado pelo filho como PARADA
+ * SUAVE: o agente termina a iteração atual (chamada LLM + tool calls), salva
+ * o recovery e sai pelo caminho normal — sem abandonar trabalho pela metade.
+ * Se não encerrar dentro do prazo (iteração travada), escala para SIGKILL.
+ */
 export function pararRun(): boolean {
   if (!estado.rodando || !processo) return false;
   estado.parando = true;
-  registrarLinha('[control] parada solicitada (SIGTERM)');
+  registrarLinha('[control] parada suave solicitada (SIGTERM) — o bot finaliza a iteracao atual e sai limpo');
+  log('INFO', 'Control: parada suave solicitada (SIGTERM)');
   try {
     processo.kill('SIGTERM');
   } catch (err) {
     estado.parando = false;
     registrarLinha(`[control] falha ao parar: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+  // Escalonamento: se o filho não sair no prazo, força o encerramento.
+  if (prazoParadaGraciosa) clearTimeout(prazoParadaGraciosa);
+  prazoParadaGraciosa = setTimeout(() => {
+    prazoParadaGraciosa = null;
+    if (estado.rodando && processo) {
+      registrarLinha('[control] parada suave nao concluiu no prazo — forçando encerramento (SIGKILL)');
+      log('WARN', 'Control: forçando encerramento do bot (SIGKILL)');
+      try {
+        processo.kill('SIGKILL');
+      } catch {
+        // Processo já morreu entre o check e o kill — nada a fazer.
+      }
+    }
+  }, PARADA_GRACIOSA_TIMEOUT_MS);
+  if (typeof prazoParadaGraciosa.unref === 'function') {
+    prazoParadaGraciosa.unref();
+  }
+  broadcastEstado();
+  return true;
+}
+
+/**
+ * Coloca o run em PAUSA (POST /api/pause). SIGUSR2 ao filho: o agente termina
+ * a iteração atual, entra em espera com o processo vivo e o navegador/sessão
+ * preservados; "Retomar" (POST /api/resume) continua de onde parou.
+ */
+export function pausarRun(): boolean {
+  if (!estado.rodando || !processo || estado.parando) return false;
+  if (estado.pausado) return true; // já pausado: idempotente
+  estado.pausado = true;
+  registrarLinha('[control] pausa solicitada (SIGUSR2) — efetiva no fim da iteracao atual');
+  log('INFO', 'Control: pausa solicitada (SIGUSR2)');
+  try {
+    processo.kill('SIGUSR2');
+  } catch (err) {
+    estado.pausado = false;
+    registrarLinha(`[control] falha ao pausar: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+  broadcastEstado();
+  return true;
+}
+
+/** Retoma um run pausado (POST /api/resume). SIGWINCH ao filho. */
+export function retomarRun(): boolean {
+  if (!estado.rodando || !processo) return false;
+  if (!estado.pausado) return true; // não pausado: idempotente
+  estado.pausado = false;
+  registrarLinha('[control] retomada solicitada (SIGWINCH)');
+  log('INFO', 'Control: retomada solicitada (SIGWINCH)');
+  try {
+    processo.kill('SIGWINCH');
+  } catch (err) {
+    estado.pausado = true;
+    registrarLinha(`[control] falha ao retomar: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
   broadcastEstado();
@@ -427,6 +533,8 @@ export function iniciarControlServer(port: number, host: string): void {
       res.write(`event: snapshot\ndata: ${JSON.stringify({
         rodando: estado.rodando,
         parando: estado.parando,
+        pausado: estado.pausado,
+        motivoPausa: estado.motivoPausa,
         iniciadoEm: estado.iniciadoEm,
         encerradoEm: estado.encerradoEm,
         codigoSaida: estado.codigoSaida,
@@ -496,6 +604,8 @@ export function iniciarControlServer(port: number, host: string): void {
         run: {
           rodando: estado.rodando,
           parando: estado.parando,
+          pausado: estado.pausado,
+          motivoPausa: estado.motivoPausa,
           dryRun: estado.dryRun,
           iniciadoEm: estado.iniciadoEm,
           iteracaoAtual: estado.iteracaoAtual,
@@ -533,6 +643,8 @@ export function iniciarControlServer(port: number, host: string): void {
       responderJSON(res, 200, {
         rodando: estado.rodando,
         parando: estado.parando,
+        pausado: estado.pausado,
+        motivoPausa: estado.motivoPausa,
         pid: estado.pid,
         iniciadoEm: estado.iniciadoEm,
         encerradoEm: estado.encerradoEm,
@@ -586,6 +698,24 @@ export function iniciarControlServer(port: number, host: string): void {
       return;
     }
 
+    if (caminho === '/api/pause' && req.method === 'POST') {
+      const ok = pausarRun();
+      responderJSON(res, ok ? 200 : 409, {
+        ok,
+        mensagem: ok ? 'Pausa solicitada' : 'Nenhum run pausável em andamento',
+      });
+      return;
+    }
+
+    if (caminho === '/api/resume' && req.method === 'POST') {
+      const ok = retomarRun();
+      responderJSON(res, ok ? 200 : 409, {
+        ok,
+        mensagem: ok ? 'Retomada solicitada' : 'Nenhum run em andamento',
+      });
+      return;
+    }
+
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('not found');
   });
@@ -620,12 +750,15 @@ export function iniciarControlServer(port: number, host: string): void {
     }
   }, 20_000).unref();
 
-  // Ao encerrar o container, o processo filho não pode ficar órfão.
+  // Ao encerrar o container, o processo filho não pode ficar órfão. Aqui é
+  // derrubada TOTAL: o SIGKILL mata na hora, sem esperar a iteração atual
+  // terminar (diferente do botão "Parar" da UI, que usa a parada suave) —
+  // no shutdown do servidor ninguém estará lendo os pipes do filho.
   for (const sinal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(sinal, () => {
       if (estado.rodando) {
         try {
-          processo?.kill('SIGTERM');
+          processo?.kill('SIGKILL');
         } catch {
           // silencioso
         }
