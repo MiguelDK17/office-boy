@@ -5,6 +5,7 @@ dist/
 config/perfil.json
 config/curriculos.json
 config/respostas.json
+config/sites.json
 assets/
 curriculos/
 screenshots/

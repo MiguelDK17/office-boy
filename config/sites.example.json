@@ -6,12 +6,9 @@
       "ativo": true,
       "instrucoes": "Buscar vagas listadas na pagina de resultados. Clicar em cada vaga para ver detalhes e preencher.",
       "urls_busca": [
-        "https://portal.gupy.io/job-search/term=Desenvolvedor%20Android",
-        "https://portal.gupy.io/job-search/term=Desenvolvedor%20Android&workplaceTypes[]=remote",
-        "https://portal.gupy.io/job-search/term=Desenvolvedor%20Android&state=Minas%20Gerais",
-        "https://portal.gupy.io/job-search/term=Desenvolvedor%20Mobile",
-        "https://portal.gupy.io/job-search/term=Desenvolvedor%20Mobile&state=Minas%20Gerais",
-        "https://portal.gupy.io/job-search/term=Desenvolvedor%20Mobile&workplaceTypes[]=remote"
+        "https://portal.gupy.io/job-search/term=Sua%20Area",
+        "https://portal.gupy.io/job-search/term=Sua%20Area&workplaceTypes[]=remote",
+        "https://portal.gupy.io/job-search/term=Sua%20Area&state=Sua%20Estado"
       ]
     },
     {
@@ -24,11 +21,10 @@
     {
       "nome": "LinkedIn",
       "tipo": "linkedin",
-      "ativo": true,
+      "ativo": false,
       "instrucoes": "Usar Easy Apply quando disponivel. Pular vagas sem Easy Apply. Preencher formularios com dados do perfil.",
       "urls_busca": [
-        "https://www.linkedin.com/jobs/search/?keywords=Desenvolvedor%20Android&f_WT=2",
-        "https://www.linkedin.com/jobs/search/?keywords=Kotlin%20Android&location=Belo%20Horizonte%2C%20Minas%20Gerais"
+        "https://www.linkedin.com/jobs/search/?keywords=Sua%20Area&f_WT=2"
       ]
     },
     {
