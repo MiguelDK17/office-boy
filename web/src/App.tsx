@@ -53,6 +53,7 @@ export default function App() {
     desconectado,
     dryRun: dryRunDoServidor,
     maxIteracoesPadrao,
+    metaCandidaturasPadrao,
     candidaturasDaRun,
     iteracaoAtual,
     iteracaoTotal,
@@ -83,6 +84,7 @@ export default function App() {
   });
   const [detailsVisible, setDetailsVisible] = useState(false);
   const [limit, setLimit] = useState("");
+  const [meta, setMeta] = useState("");
   const [messageIndex, setMessageIndex] = useState(0);
 
   // Lembra tema e terminal entre sessões (mesma chave do dashboard legado).
@@ -144,9 +146,14 @@ export default function App() {
       await parar();
       return;
     }
-    // Campo vazio = padrão do .env (null → backend usa MAX_ITERACOES).
+    // Campo vazio = padrão do .env (null → backend usa MAX_ITERACOES/META).
     const n = parseInt(limit, 10);
-    await iniciar(dryRun, Number.isFinite(n) && n >= 1 ? n : null);
+    const m = parseInt(meta, 10);
+    await iniciar(
+      dryRun,
+      Number.isFinite(n) && n >= 1 ? n : null,
+      Number.isFinite(m) && m >= 0 ? m : null,
+    );
   }
 
   async function alternarPausa() {
@@ -310,6 +317,20 @@ export default function App() {
                 onChange={(event) => setLimit(event.target.value.replace(/\D/g, ""))}
                 inputMode="numeric"
                 placeholder={String(maxIteracoesPadrao)}
+              />
+              <small>Vazio usa o padrão do .env</small>
+            </div>
+            <div>
+              <label htmlFor="run-meta">Meta de candidaturas</label>
+              <span>Run encerra com sucesso ao atingir (0 = desativada)</span>
+            </div>
+            <div className="input-wrap">
+              <input
+                id="run-meta"
+                value={meta}
+                onChange={(event) => setMeta(event.target.value.replace(/\D/g, ""))}
+                inputMode="numeric"
+                placeholder={String(metaCandidaturasPadrao)}
               />
               <small>Vazio usa o padrão do .env</small>
             </div>

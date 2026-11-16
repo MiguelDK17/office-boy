@@ -20,11 +20,12 @@ export async function carregarDados(): Promise<ApiData> {
   return (await resp.json()) as ApiData;
 }
 
-/** POST /api/start. Iterações null/undefined → o backend usa o padrão do .env.
- *  Retorna a mensagem de erro do backend (ex.: navegador indisponível) ou null. */
+/** POST /api/start. Iterações/meta null/undefined → o backend usa o padrão do
+ *  .env. Retorna a mensagem de erro do backend (ex.: navegador indisponível) ou null. */
 export async function iniciarBot(
   dryRun: boolean,
   maxIteracoes?: number | null,
+  metaCandidaturas?: number | null,
 ): Promise<string | null> {
   const resp = await fetch("/api/start", {
     method: "POST",
@@ -33,6 +34,9 @@ export async function iniciarBot(
       dryRun,
       ...(maxIteracoes != null && Number.isFinite(maxIteracoes)
         ? { maxIteracoes }
+        : {}),
+      ...(metaCandidaturas != null && Number.isFinite(metaCandidaturas)
+        ? { metaCandidaturas }
         : {}),
     }),
   });

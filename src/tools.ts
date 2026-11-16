@@ -614,7 +614,21 @@ export function ehToolCustomizada(name: string): boolean {
 
 // ========== EXECUTOR DAS TOOLS ==========
 
-export function criarExecutorDeTools(perfil: Perfil, config: AgenteConfig) {
+/**
+ * Sinais de estado que o executor devolve ao loop do agente. O gate de
+ * registrar_candidatura é o ponto 100% determinístico do run — é lá que a
+ * meta de qualidade é contada, e daqui que o loop do agente fica sabendo.
+ */
+export interface SinaisDoExecutor {
+  /** True quando a meta de candidaturas de qualidade foi atingida nesta execução. */
+  metaAtingida: boolean;
+}
+
+export function criarExecutorDeTools(
+  perfil: Perfil,
+  config: AgenteConfig,
+  sinais?: SinaisDoExecutor,
+) {
   // Config injetada (não mais globais mutáveis): permite dry-run autoritativo e
   // scoring configurável, e torna o executor previsível para testes.
   // NOTA: o executor NÃO depende de nenhum LLM de navegação — as tarefas
@@ -629,6 +643,10 @@ export function criarExecutorDeTools(perfil: Perfil, config: AgenteConfig) {
   // agente passa pelo checkpoint confirmar_envio; a trava 100% determinística
   // de gravação é o gate em registrar_candidatura.
   let enviosConfirmados = 0;
+  // Meta de qualidade: candidaturas de qualidade (score >= minimo, registradas
+  // no banco) nesta execução. Ao atingir META_CANDIDATURAS, o run encerra com
+  // SUCESSO — nunca por texto do modelo (ver guarda anti-abandono).
+  let candidaturasQualidade = 0;
   // Portais que bloquearam na entrada NESTA execução — abandonados por completo
   // (não adianta tentar outras URLs/páginas; só queima iterações e risco de ban).
   const portaisBloqueados = new Set<string>();
@@ -689,6 +707,23 @@ export function criarExecutorDeTools(perfil: Perfil, config: AgenteConfig) {
         if (sucesso) {
           log('AGENTE', `Candidatura registrada: ${tituloVaga} — ${empresa} (score: ${score})`);
           notificarCandidatura(empresa, tituloVaga, score, isDryRun).catch(() => {});
+          // Contagem da meta de qualidade. O gate acima já garantiu
+          // score >= minimo, então TUDO que chega aqui é candidatura de
+          // qualidade — vale para produção e dry-run (o dry-run registra
+          // candidatura com status 'dry-run').
+          if (config.metaCandidaturas > 0) {
+            candidaturasQualidade++;
+            log('AGENTE', `Meta de qualidade: ${candidaturasQualidade}/${config.metaCandidaturas} candidatura(s) nesta execucao.`);
+            if (candidaturasQualidade >= config.metaCandidaturas) {
+              log('AGENTE', `META DE QUALIDADE ATINGIDA (${candidaturasQualidade}/${config.metaCandidaturas}) — a execucao sera encerrada com sucesso.`);
+              if (sinais) sinais.metaAtingida = true;
+              return JSON.stringify({
+                registrado: true,
+                meta_atingida: true,
+                mensagem: `META DE QUALIDADE ATINGIDA: ${candidaturasQualidade}/${config.metaCandidaturas} candidaturas de qualidade nesta execucao. NAO se candidate a mais nenhuma vaga — a execucao sera encerrada agora.`,
+              });
+            }
+          }
         }
         return sucesso
           ? 'REGISTRADO: Candidatura salva no banco de dados com sucesso.'

@@ -31,7 +31,7 @@ const MAX_HISTORICO = 30;
 const RECOVERY_PATH = path.resolve(__dirname, '..', 'data', 'recovery.json');
 
 function buildSystemPrompt(perfil: Perfil, sites: SitesConfig, config: AgenteConfig): string {
-  const { limiteDiario, dryRun, scoreMinimo } = config;
+  const { limiteDiario, dryRun, scoreMinimo, metaCandidaturas } = config;
   return `
 Voce e um agente inteligente de candidatura automatica a vagas de emprego.
 Voce controla um navegador real (Chrome do usuario, ja logado nos sites) atraves das browser tools.
@@ -39,6 +39,12 @@ ${dryRun ? '\n** MODO DRY-RUN ATIVO: faca TODO o processo normalmente (navegar, 
 
 ## Seu Objetivo
 Navegar pelos sites configurados, buscar vagas relevantes e se candidatar automaticamente.
+
+## META DA EXECUCAO (critério de encerramento)
+- A meta desta execucao e registrar ${metaCandidaturas > 0 ? `${metaCandidaturas} candidatura(s) de qualidade (score >= ${scoreMinimo})` : 'o maximo de candidaturas de qualidade (score >= ' + scoreMinimo + ')'}.
+- Ao atingir a meta, o SISTEMA encerra a execucao automaticamente (aviso no retorno de registrar_candidatura). A partir dai NAO se candidate a mais nenhuma vaga.
+- Enquanto a meta NAO for atingida, NAO PARE: continue navegando pelos sites e paginas restantes.
+- TEXTO PURO NUNCA encerra a execucao. Resumo conversacional, desculpa ou "pronto, terminei" sao recusados pelo sistema — so tools avancam o trabalho.
 
 ## Fluxo de Trabalho
 Para CADA site da lista:
@@ -270,7 +276,7 @@ O sistema classifica automaticamente e decide se deve pular ou retentar.
 4. NAO tente resolver falhas permanentes — pule e siga em frente
 
 ## Ao Finalizar
-Quando terminar todos os sites ou atingir o limite diario, faca um resumo:
+O run encerra por acao do SISTEMA (meta de qualidade atingida ou teto de iteracoes) — nao por texto seu. Faca o resumo final APENAS quando o sistema avisar a meta atingida no retorno de registrar_candidatura; inclua:
 - Quantas candidaturas foram feitas
 - Em quais empresas/vagas
 - Se houve algum erro ou bloqueio (inclua os codigos de falha)
@@ -431,7 +437,10 @@ export async function executarAgente(
   config: AgenteConfig,
 ): Promise<string> {
   const client = criarClientAgente(config);
-  const executarTool = criarExecutorDeTools(perfil, config);
+  // Sinalizador que o executor de tools seta quando a meta de qualidade é
+  // atingida — o loop checa em cada fronteira de iteração (100% determinístico).
+  const sinais = { metaAtingida: false };
+  const executarTool = criarExecutorDeTools(perfil, config, sinais);
   const systemPrompt = buildSystemPrompt(perfil, sites, config);
 
   const sitesAtivos = sites.sites.filter(s => s.ativo);
@@ -442,6 +451,7 @@ export async function executarAgente(
   log('AGENTE', `Iniciando com ${sitesAtivos.length} site(s) ativo(s)`);
   log('AGENTE', `Limite diario: ${config.limiteDiario} candidaturas`);
   log('AGENTE', `Limites de iteracao: ${obterMaxIteracoes(config)} (custo max: ${config.custoMaxUsd > 0 ? `$${config.custoMaxUsd.toFixed(2)}` : 'off'})`);
+  log('AGENTE', `Meta de qualidade: ${config.metaCandidaturas > 0 ? `${config.metaCandidaturas} candidatura(s) — encerra o run com sucesso` : 'off (só teto/custo encerram)'}`);
   log('AGENTE', `LLM: ${config.agentLlmModel} via ${config.agentLlmBaseUrl}`);
 
   // Descobre as tools do Playwright MCP UMA vez e converte para o padrão
@@ -499,12 +509,12 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
   // GUARDA ANTI-ABANDONO: modelos fracos (vários free no OpenRouter) encerram
   // o run no meio respondendo só-texto — às vezes com texto degenerado em
   // loop ("vou tentar novamente" ×9), às vezes com uma resposta de chat
-  // off-topic ("não posso ajudar com carreira..."). Sem tool calls, o loop
-  // antigo encerrava como "resposta final". Agora: cedo no run, a desistência
-  // é recusada — o controle volta ao modelo com um aviso `user`. Depois de
-  // MAX nudges (ou passado o limite de iterações), aceita-se como final.
-  const MAX_NUDGES_ABANDONO = 2;
-  const limiteGuardaAbandono = Math.min(Math.max(Math.floor(maxIter * 0.2), 5), 50);
+  // off-topic ("não posso ajudar com carreira..."). O fusível antigo aceitava
+  // a desistência como "resposta final" após N nudges — isso ENCERRAVA o run
+  // por texto, que é justamente o que não pode. Texto NUNCA encerra o run:
+  // toda resposta só-texto é recusada com um aviso `user` e o loop continua.
+  // Os únicos encerramentos válidos são determinísticos: meta de qualidade,
+  // teto de iterações, custo máximo, erro fatal ou parada/pausa do usuário.
   let nudgesAbandono = 0;
 
   while (iteracao < maxIter) {
@@ -611,35 +621,25 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
       );
 
       if (!toolCalls || toolCalls.length === 0) {
-        // Sem tool calls = modelo respondeu só texto. Pode ser conclusão
-        // legítima OU abandono no meio do fluxo (guarda abaixo).
+        // Sem tool calls = modelo respondeu só texto. NUNCA encerra o run:
+        // desistência, papo off-topic ou resumo prematuro são recusados e o
+        // controle volta ao modelo com um aviso `user`. Cada recusa consome
+        // uma iteração do teto, então um modelo biruto queima iterações/custo
+        // até os backstops — nunca "vence" o run por desistência.
+        nudgesAbandono++;
         const textoModelo = message.content || '';
-        if (iteracao <= limiteGuardaAbandono && nudgesAbandono < MAX_NUDGES_ABANDONO) {
-          nudgesAbandono++;
-          log('AGENTE', `Guarda anti-abandono (${nudgesAbandono}/${MAX_NUDGES_ABANDONO}): resposta so-texto na iteracao ${iteracao}. Recusando a desistencia e devolvendo controle ao modelo.`);
-          log('AGENTE', `Texto recusado:\n${textoModelo.substring(0, 400)}`);
-          history.push({
-            role: 'user',
-            content:
-              'AVISO_DO_SISTEMA: voce respondeu APENAS TEXTO, sem nenhuma tool call. A execucao NAO terminou — ainda ha vagas e sites a processar. ' +
-              'Respostas conversacionais, desculpas ou planos ("vou tentar novamente...") NAO encerram o run. ' +
-              'Use as tools agora (browser_navigate, browser_snapshot, verificar_vaga_ja_vista, pontuar_vaga, fluxo de candidatura etc.) e continue o trabalho. ' +
-              'So responda em texto puro quando o fluxo realmente acabar.',
-          });
-          continue;
-        }
-        log('AGENTE', `Resposta final do modelo:\n${textoModelo}`);
-        respostaFinal = textoModelo;
-        // Se foi preciso nudgear para chegar aqui, quase certamente foi
-        // desistência (não conclusão) — preserva o recovery para a próxima
-        // execução tentar de novo, em vez de registrar como run completa.
-        if (nudgesAbandono > 0) {
-          salvarRecovery(iteracao, sitesAtivos.map(s => s.nome));
-          saiuComErroFatal = true;
-        } else {
-          limparRecovery();
-        }
-        break;
+        log('AGENTE', `Guarda anti-abandono (nudge ${nudgesAbandono}): resposta so-texto na iteracao ${iteracao}. Recusando — texto NAO encerra o run.`);
+        log('AGENTE', `Texto recusado:\n${textoModelo.substring(0, 400)}`);
+        history.push({
+          role: 'user',
+          content:
+            'AVISO_DO_SISTEMA: voce respondeu APENAS TEXTO, sem nenhuma tool call. A execucao NAO terminou — ainda ha vagas e sites a processar. ' +
+            'Respostas conversacionais, desculpas, planos ("vou tentar novamente...") ou resumos NAO encerram o run. ' +
+            'Use as tools agora (browser_navigate, browser_snapshot, verificar_vaga_ja_vista, pontuar_vaga, fluxo de candidatura etc.) e continue o trabalho. ' +
+            'A execucao so encerra quando a meta de candidaturas de qualidade for atingida (o sistema avisa no retorno de registrar_candidatura) ' +
+            'ou pelo teto de iteracoes — em ambos os casos, por acao do sistema, NAO por texto seu. Continue trabalhando.',
+        });
+        continue;
       }
 
       // Processa as tool calls SEQUENCIALMENTE.
@@ -763,6 +763,18 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
           tool_call_id: tc.id,
           content: resultado,
         });
+      }
+
+      // META DE QUALIDADE: o gate de registrar_candidatura sinalizou que a
+      // meta do run foi atingida. Encerramento de SUCESSO em fronteira de
+      // iteração — determinístico, não depende do modelo encerrar por texto
+      // (que a guarda anti-abandono jamais aceita). Recovery limpo: a próxima
+      // execução NÃO vê aviso de interrupção, pois este run terminou completo.
+      if (sinais.metaAtingida) {
+        respostaFinal = `Execucao concluida com sucesso: meta de ${config.metaCandidaturas} candidatura(s) de qualidade atingida apos ${iteracao} iteracao(oes).`;
+        log('AGENTE', `META DE QUALIDADE ATINGIDA — ${respostaFinal}`);
+        limparRecovery();
+        break;
       }
 
       // Compactação: trunca snapshots antigos mantendo o pareamento

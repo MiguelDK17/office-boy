@@ -60,6 +60,10 @@ function validarEnv(): AgenteConfig {
     delayMax: parseInt(process.env.DELAY_MAX || '5000', 10),
     dryRun: process.env.DRY_RUN === 'true',
     scoreMinimo: parseInt(process.env.SCORE_MINIMO || '6', 10),
+    // Meta de candidaturas de qualidade por run — o encerramento de SUCESSO do
+    // agente. Default 10; 0 = desativado (run só encerra por MAX_ITERACOES ou
+    // CUSTO_MAX_USD). Contada no gate determinístico de registrar_candidatura.
+    metaCandidaturas: Math.max(parseInt(process.env.META_CANDIDATURAS ?? '10', 10) || 0, 0),
     custoMaxUsd: parseFloat(process.env.CUSTO_MAX_USD || '0'),
     // Pausa automática no login: true por padrão (só roda com o usuário por perto).
     pausarEmLogin: process.env.PAUSAR_EM_LOGIN !== 'false',
@@ -328,6 +332,7 @@ async function main() {
   log('INFO', `CDP: ${config.cdpEndpoint}`);
   log('INFO', `Limite diario: ${config.limiteDiario}`);
   log('INFO', `Score minimo: ${config.scoreMinimo}/10`);
+  log('INFO', `Meta de qualidade: ${config.metaCandidaturas > 0 ? `${config.metaCandidaturas} candidatura(s) por run` : 'desativada'}`);
 
   if (config.dryRun) {
     log('WARN', '*** MODO DRY-RUN ATIVO — nenhuma candidatura sera enviada de verdade ***');

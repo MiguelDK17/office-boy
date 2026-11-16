@@ -87,6 +87,12 @@ export interface AgenteConfig {
   dashboardHost: string;
   // Circuito de parada por custo (0 = desativado)
   custoMaxUsd: number;
+  // Meta de candidaturas de qualidade por run (default 10; 0 = desativado).
+  // Encerramento "de sucesso": quando a contagem de candidaturas registradas
+  // com score >= scoreMinimo atinge a meta, o run finaliza limpo (recovery
+  // limpo, sem erro fatal). MAX_ITERACOES e CUSTO_MAX_USD continuam como
+  // backstops, nunca como gatilho principal.
+  metaCandidaturas: number;
   // Pausar o run automaticamente ao detectar página de login (default true).
   // O processo fica vivo e a UI/Telegram avisam para o usuário logar no Chrome.
   pausarEmLogin: boolean;

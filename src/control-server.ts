@@ -56,6 +56,17 @@ const MIME: Record<string, string> = {
 const PADRAO_MAX_ITERACOES = parseInt(process.env.MAX_ITERACOES || '500', 10) || 500;
 const MAX_ITERACOES_TETO = 5000;
 
+// Meta de candidaturas de qualidade configurável na UI (PADRAO_META =
+// fallback do .env, 10 quando não define; 0 = desativada; teto de 1000 é
+// guarda contra valor absurdo vindo da UI).
+const PADRAO_META_CANDIDATURAS = Math.max(parseInt(process.env.META_CANDIDATURAS || '10', 10) || 0, 0);
+
+function saneiaMetaCandidaturas(valor: unknown): number {
+  const n = Math.floor(Number(valor));
+  if (!Number.isFinite(n)) return PADRAO_META_CANDIDATURAS;
+  return Math.min(Math.max(n, 0), 1000);
+}
+
 function saneiaMaxIteracoes(valor: unknown): number {
   const n = Math.floor(Number(valor));
   if (!Number.isFinite(n)) return PADRAO_MAX_ITERACOES;
@@ -224,7 +235,8 @@ function contarCandidaturasDaRun(): number {
 export async function iniciarRun(
   dryRun?: boolean,
   maxIteracoes?: number,
-): Promise<{ ok: boolean; motivo?: string; maxIteracoes?: number }> {
+  metaCandidaturas?: number,
+): Promise<{ ok: boolean; motivo?: string; maxIteracoes?: number; metaCandidaturas?: number }> {
   if (estado.rodando) return { ok: false, motivo: 'Já existe um run em andamento' };
 
   const nav = await consultarNavegador();
@@ -238,6 +250,7 @@ export async function iniciarRun(
   const { command, args } = comandoDoBot();
   const usarDryRun = dryRun ?? (process.env.DRY_RUN === 'true');
   const limiteIteracoes = saneiaMaxIteracoes(maxIteracoes);
+  const meta = saneiaMetaCandidaturas(metaCandidaturas);
 
   estado.rodando = true;
   estado.parando = false;
@@ -254,18 +267,20 @@ export async function iniciarRun(
   estado.iteracaoTotal = limiteIteracoes;
 
   // O filho NÃO sobe dashboard (esta porta já é do control server) e roda em
-  // modo agente normal. MAX_ITERACOES sobrescreve o .env — tem precedência
-  // porque é o valor explicitamente escolhido na UI para ESTE run.
+  // modo agente normal. MAX_ITERACOES e META_CANDIDATURAS sobrescrevem o .env
+  // — têm precedência porque são os valores explicitamente escolhidos na UI
+  // para ESTE run.
   const env = {
     ...process.env,
     DASHBOARD_ENABLED: 'false',
     CONTROL_MODE: 'false',
     DRY_RUN: String(usarDryRun),
     MAX_ITERACOES: String(limiteIteracoes),
+    META_CANDIDATURAS: String(meta),
   };
 
-  registrarLinha(`[control] iniciando bot (dry-run=${usarDryRun}, iteracoes<=${limiteIteracoes}) — ${command} ${args.join(' ')}`);
-  log('INFO', `Control: iniciando bot (dry-run=${usarDryRun}, max ${limiteIteracoes} iteracoes)`);
+  registrarLinha(`[control] iniciando bot (dry-run=${usarDryRun}, iteracoes<=${limiteIteracoes}, meta=${meta}) — ${command} ${args.join(' ')}`);
+  log('INFO', `Control: iniciando bot (dry-run=${usarDryRun}, max ${limiteIteracoes} iteracoes, meta ${meta} candidaturas)`);
   broadcastEstado();
 
   processo = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -303,7 +318,7 @@ export async function iniciarRun(
     broadcastEstado();
   });
 
-  return { ok: true, maxIteracoes: limiteIteracoes };
+  return { ok: true, maxIteracoes: limiteIteracoes, metaCandidaturas: meta };
 }
 
 /**
@@ -543,6 +558,7 @@ export function iniciarControlServer(port: number, host: string): void {
         iteracaoAtual: estado.iteracaoAtual,
         iteracaoTotal: estado.iteracaoTotal,
         maxIteracoesPadrao: PADRAO_MAX_ITERACOES,
+        metaCandidaturasPadrao: PADRAO_META_CANDIDATURAS,
         linhas: estado.linhas.slice(-200),
         candidaturasDaRun: contarCandidaturasDaRun(),
       })}\n\n`);
@@ -656,6 +672,8 @@ export function iniciarControlServer(port: number, host: string): void {
         iteracaoTotal: estado.iteracaoTotal,
         // Padrão de iterações (do .env) — usado para pré-preencher o campo na UI.
         maxIteracoesPadrao: PADRAO_MAX_ITERACOES,
+        // Padrão da meta de qualidade (do .env) — idem, pré-preenche o campo.
+        metaCandidaturasPadrao: PADRAO_META_CANDIDATURAS,
         navegador: await consultarNavegador(),
       });
       return;
@@ -670,21 +688,26 @@ export function iniciarControlServer(port: number, host: string): void {
       const corpo = await lerCorpo(req);
       let dryRun: boolean | undefined;
       let maxIteracoes: number | undefined;
+      let metaCandidaturas: number | undefined;
       try {
-        const parsed = JSON.parse(corpo || '{}') as { dryRun?: boolean; maxIteracoes?: unknown };
+        const parsed = JSON.parse(corpo || '{}') as { dryRun?: boolean; maxIteracoes?: unknown; metaCandidaturas?: unknown };
         if (typeof parsed.dryRun === 'boolean') dryRun = parsed.dryRun;
         if (parsed.maxIteracoes !== undefined && parsed.maxIteracoes !== null && parsed.maxIteracoes !== '') {
           maxIteracoes = saneiaMaxIteracoes(parsed.maxIteracoes);
         }
+        if (parsed.metaCandidaturas !== undefined && parsed.metaCandidaturas !== null && parsed.metaCandidaturas !== '') {
+          metaCandidaturas = saneiaMetaCandidaturas(parsed.metaCandidaturas);
+        }
       } catch {
         // corpo inválido: usa os padrões do .env
       }
-      const resultado = await iniciarRun(dryRun, maxIteracoes);
+      const resultado = await iniciarRun(dryRun, maxIteracoes, metaCandidaturas);
       responderJSON(res, resultado.ok ? 200 : 409, {
         ok: resultado.ok,
         mensagem: resultado.ok ? 'Bot iniciado' : (resultado.motivo ?? 'Não foi possível iniciar'),
         rodando: estado.rodando,
         maxIteracoes: resultado.maxIteracoes,
+        metaCandidaturas: resultado.metaCandidaturas,
       });
       return;
     }

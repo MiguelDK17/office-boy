@@ -35,6 +35,8 @@ export interface UseBot {
   dryRun: boolean;
   /** Padrão do .env (para o placeholder do campo "Interações por run"). */
   maxIteracoesPadrao: number;
+  /** Padrão do .env (para o placeholder do campo "Meta de candidaturas"). */
+  metaCandidaturasPadrao: number;
   candidaturasDaRun: number;
   iteracaoAtual: number;
   iteracaoTotal: number;
@@ -43,7 +45,7 @@ export interface UseBot {
   dados: ApiData | null;
   /** Mensagem de erro da última tentativa de iniciar (ex.: navegador off). */
   erroIniciar: string | null;
-  iniciar: (dryRun: boolean, maxIteracoes: number | null) => Promise<void>;
+  iniciar: (dryRun: boolean, maxIteracoes: number | null, metaCandidaturas: number | null) => Promise<void>;
   parar: () => Promise<void>;
   pausar: () => Promise<void>;
   retomar: () => Promise<void>;
@@ -67,6 +69,7 @@ export function useBot(): UseBot {
   const [estado, setEstado] = useState<EstadoRun>(estadoInicial);
   const [desconectado, setDesconectado] = useState(true);
   const [maxIteracoesPadrao, setMaxIteracoesPadrao] = useState(500);
+  const [metaCandidaturasPadrao, setMetaCandidaturasPadrao] = useState(10);
   const [candidaturasDaRun, setCandidaturasDaRun] = useState(0);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [dados, setDados] = useState<ApiData | null>(null);
@@ -102,6 +105,7 @@ export function useBot(): UseBot {
       onSnapshot: (s: Snapshot) => {
         if (cancelado) return;
         setMaxIteracoesPadrao(s.maxIteracoesPadrao || 500);
+        setMetaCandidaturasPadrao(s.metaCandidaturasPadrao ?? 10);
         setCandidaturasDaRun(s.candidaturasDaRun);
         setLogs(parseLote(s.linhas));
         rodandoRef.current = s.rodando;
@@ -157,9 +161,9 @@ export function useBot(): UseBot {
   }, [recarregarDados]);
 
   const iniciar = useCallback(
-    async (dryRun: boolean, maxIteracoes: number | null) => {
+    async (dryRun: boolean, maxIteracoes: number | null, metaCandidaturas: number | null) => {
       setErroIniciar(null);
-      const erro = await iniciarBot(dryRun, maxIteracoes);
+      const erro = await iniciarBot(dryRun, maxIteracoes, metaCandidaturas);
       if (erro) setErroIniciar(erro);
     },
     [],
@@ -198,6 +202,7 @@ export function useBot(): UseBot {
     desconectado,
     dryRun: estado.dryRun,
     maxIteracoesPadrao,
+    metaCandidaturasPadrao,
     candidaturasDaRun,
     iteracaoAtual: estado.iteracaoAtual,
     iteracaoTotal: estado.iteracaoTotal,

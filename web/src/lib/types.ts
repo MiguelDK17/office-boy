@@ -22,6 +22,7 @@ export interface EstadoRun {
 
 export interface Snapshot extends EstadoRun {
   maxIteracoesPadrao: number;
+  metaCandidaturasPadrao: number;
   linhas: string[];
   candidaturasDaRun: number;
 }
