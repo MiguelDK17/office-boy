@@ -3,6 +3,50 @@
 
 export type BotState = "stopped" | "running" | "paused" | "stopping" | "offline";
 
+// ========== /api/config (telas Perfil e Configurações) ==========
+
+export type GrupoEnv = "execucao" | "agente" | "auxiliar" | "servidor" | "notificacoes" | "cron";
+
+/** Um campo do .env exposto na UI. Secret NUNCA tem valor — só "definido". */
+export interface CampoEnv {
+  chave: string;
+  grupo: GrupoEnv;
+  tipo: "numero" | "booleano" | "texto";
+  secreto: boolean;
+  somenteLeitura: boolean;
+  valor: string | number | boolean | null;
+  definido: boolean;
+}
+
+export interface ExperienciaPerfil {
+  empresa: string;
+  cargo: string;
+  periodo: string;
+  descricao: string;
+}
+
+/** Corpo de GET /api/config — dados reais dos configs e do .env. */
+export interface Configuracao {
+  perfil: Record<string, unknown>;
+  respostas: Record<string, unknown>;
+  sites: { sites: Array<{ nome: string; tipo: string; instrucoes: string; urls_busca: string[]; ativo: boolean }> };
+  curriculos: {
+    fallback?: Record<string, string>;
+    curriculos?: Array<{ id: string; arquivo: string; foco: string; usar_quando: string }>;
+  };
+  env: CampoEnv[];
+  /** false = .env não existe neste ambiente (container) — salvar config mostra o motivo. */
+  envDisponivel: boolean;
+}
+
+export interface SiteConfig {
+  nome: string;
+  tipo: "portal_vagas" | "linkedin" | "empresa_direta" | string;
+  instrucoes: string;
+  urls_busca: string[];
+  ativo: boolean;
+}
+
 /** Estado completo do run, como enviado no snapshot e nos eventos `estado` do SSE. */
 export interface EstadoRun {
   rodando: boolean;

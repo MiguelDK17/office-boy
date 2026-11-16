@@ -15,6 +15,8 @@
 //   GET  /api/data     → métricas, funil e candidaturas recentes (JSON)
 //   GET  /api/logs     → últimas linhas de log do run
 //   GET  /events       → SSE: snapshot + log/estado/progresso ao vivo
+//   GET  /api/config   → perfil, respostas, sites, currículos e .env (mascarado)
+//   PUT  /api/config/* → grava perfil/respostas/sites/curriculos/env (ver config-api.ts)
 //   POST /api/start    → inicia o bot ({ dryRun?: boolean, maxIteracoes?: number })
 //   POST /api/stop     → para o bot em andamento
 
@@ -26,6 +28,7 @@ import { fileURLToPath } from 'url';
 import { log } from './logger.js';
 import { inicializarBanco, contarCandidaturasDesde, listarCandidaturas, obterEstatisticas } from './database.js';
 import { gerarHTML } from './dashboard.js';
+import { rotearConfig } from './config-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -517,7 +520,9 @@ function lerCorpo(req: http.IncomingMessage): Promise<string> {  return new Prom
     let dados = '';
     req.on('data', (c) => {
       dados += c;
-      if (dados.length > 10_000) req.destroy();
+      // 100 KB: os configs reais (perfil/respostas) cabem em ~6 KB — a folga é
+      // para nunca estrangular a PUT /api/config/perfil de um perfil grande.
+      if (dados.length > 100_000) req.destroy();
     });
     req.on('end', () => resolve(dados));
     req.on('error', () => resolve(''));
@@ -681,6 +686,11 @@ export function iniciarControlServer(port: number, host: string): void {
 
     if (caminho === '/api/logs') {
       responderJSON(res, 200, { linhas: estado.linhas.slice(-200) });
+      return;
+    }
+
+    // /api/config*: perfil, respostas, sites, currículos e .env (ver config-api.ts)
+    if (await rotearConfig(req, res, caminho)) {
       return;
     }
 

@@ -6,14 +6,19 @@
 
 import { useEffect, useState } from "react";
 import { useBot } from "./hooks/useBot";
+import { useConfig } from "./hooks/useConfig";
 import { FunnelBar } from "./components/FunnelBar";
 import { Icon } from "./components/Icon";
 import { MetricCard } from "./components/MetricCard";
 import { RobotVisual } from "./components/RobotVisual";
 import { StatusChip } from "./components/StatusChip";
 import { TerminalPanel } from "./components/TerminalPanel";
+import { ProfileScreen } from "./screens/ProfileScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
 import { prepararAudio, tocarSomPausa } from "./lib/som";
 import type { Candidatura } from "./lib/types";
+
+type ActiveTab = "run" | "profile" | "settings";
 
 const runningMessages = [
   "Analisando vagas e enviando candidaturas compatíveis com seu perfil.",
@@ -47,6 +52,7 @@ function rotuloStatus(c: Candidatura): string {
 }
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<ActiveTab>("run");
   const {
     status,
     motivoPausa,
@@ -65,6 +71,9 @@ export default function App() {
     pausar,
     retomar,
   } = useBot();
+
+  // Perfis e .env só são carregados quando uma das telas de config é aberta.
+  const cfg = useConfig(activeTab === "profile" || activeTab === "settings");
 
   const [darkMode, setDarkMode] = useState(() => {
     try {
@@ -173,14 +182,35 @@ export default function App() {
       <div className="ambient ambient-right" />
 
       <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">
-            <Icon name="sparkle" size={18} />
-          </span>
-          <span>
-            <strong>Office Boy</strong>
-            <small>Dashboard</small>
-          </span>
+        <div className="header-left">
+          <div className="brand">
+            <span className="brand-mark">
+              <Icon name="sparkle" size={18} />
+            </span>
+            <span>
+              <strong>Office Boy</strong>
+              <small>Dashboard</small>
+            </span>
+          </div>
+          <nav className="main-tabs" aria-label="Navegação principal">
+            <span className={`tab-slider ${activeTab !== "run" ? `tab-slider-${activeTab}` : ""}`} aria-hidden="true" />
+            {[
+              { id: "run" as const, label: "Run", icon: "play" as const },
+              { id: "profile" as const, label: "Perfil", icon: "users" as const },
+              { id: "settings" as const, label: "Configurações", icon: "settings" as const },
+            ].map((tab) => (
+              <button
+                className={`nav-tab ${activeTab === tab.id ? "nav-tab-active" : ""}`}
+                onClick={() => setActiveTab(tab.id)}
+                aria-current={activeTab === tab.id ? "page" : undefined}
+                aria-label={tab.label}
+                key={tab.id}
+              >
+                <Icon name={tab.icon} size={16} />
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </nav>
         </div>
         <div className="header-actions">
           <StatusChip status={status} desconectado={desconectado} />
@@ -194,7 +224,16 @@ export default function App() {
         </div>
       </header>
 
-      <main className={terminalExpanded ? "with-expanded-terminal" : ""}>
+      {activeTab === "profile" ? (
+        <main className="tab-content tab-form-screen">
+          <ProfileScreen cfg={cfg} />
+        </main>
+      ) : activeTab === "settings" ? (
+        <main className="tab-content tab-form-screen">
+          <SettingsScreen cfg={cfg} onReiniciarBot={() => setActiveTab("run")} />
+        </main>
+      ) : (
+      <main className={terminalExpanded ? "tab-content tab-run with-expanded-terminal" : "tab-content tab-run"}>
         <section className="hero-card" aria-labelledby="hero-title">
           <div className="hero-heading">
             <span className="eyebrow">
@@ -470,12 +509,15 @@ export default function App() {
           </div>
         </div>
       </main>
+      )}
 
-      <TerminalPanel
-        logs={logs}
-        expanded={terminalExpanded}
-        onToggle={() => setTerminalExpanded((value) => !value)}
-      />
+      {activeTab === "run" && (
+        <TerminalPanel
+          logs={logs}
+          expanded={terminalExpanded}
+          onToggle={() => setTerminalExpanded((value) => !value)}
+        />
+      )}
     </div>
   );
 }

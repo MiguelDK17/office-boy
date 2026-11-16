@@ -33,8 +33,13 @@ x-comum: &comum
     - bot-logs:/app/logs
     - bot-shots:/app/screenshots
     # Config e currículos vêm do host (dados pessoais, fora da imagem).
-    - ./config:/app/config:ro
+    # Escrita liberada: a UI (PUT /api/config/*) salva perfil/respostas/sites/
+    # currículos direto no host — persiste entre rebuilds.
+    - ./config:/app/config
     - ./curriculos:/app/curriculos
+    # .env montado para a UI ler/salvar variáveis (PUT /api/config/env).
+    # O compose aplica os novos valores no recreate (`docker compose up -d`).
+    - ./.env:/app/.env
 
 services:
   # ---- Padrão: usa o Chrome do HOST (janela real, teclado real) ------------

@@ -6,12 +6,37 @@
 
 import type {
   ApiData,
+  Configuracao,
   EstadoRun,
   LogLine,
   LogTone,
   Progresso,
   Snapshot,
 } from "./types";
+
+/** GET /api/config — dados reais dos configs (perfil/respostas/sites/currículos) + .env mascarado. */
+export async function carregarConfiguracao(): Promise<Configuracao> {
+  const resp = await fetch("/api/config");
+  if (!resp.ok) throw new Error(`api/config: ${resp.status}`);
+  return (await resp.json()) as Configuracao;
+}
+
+/** PUT genérico das rotas de config. Retorna mensagem de erro do backend ou null. */
+async function salvarConfig(rota: string, corpo: unknown): Promise<string | null> {
+  const resp = await fetch(`/api/config/${rota}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+  const dados = (await resp.json().catch(() => ({}))) as { mensagem?: string };
+  return resp.ok ? null : (dados.mensagem ?? `Falha ao salvar ${rota}`);
+}
+
+export const salvarPerfil = (perfil: Record<string, unknown>) => salvarConfig("perfil", perfil);
+export const salvarRespostas = (respostas: Record<string, unknown>) => salvarConfig("respostas", respostas);
+export const salvarSites = (sites: { sites: unknown }) => salvarConfig("sites", sites);
+export const salvarCurriculos = (curriculos: unknown) => salvarConfig("curriculos", curriculos);
+export const salvarEnv = (valores: Record<string, string>) => salvarConfig("env", { valores });
 
 /** Corpo de GET /api/data — métricas, funil e candidaturas recentes. */
 export async function carregarDados(): Promise<ApiData> {
