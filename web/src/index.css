@@ -434,19 +434,6 @@ main.with-expanded-terminal {
   opacity: 0.55;
 }
 
-.lottie-label {
-  position: absolute;
-  bottom: 3px;
-  padding: 4px 8px;
-  border-radius: 999px;
-  color: var(--faint);
-  background: var(--surface-soft);
-  font:
-    500 8px "JetBrains Mono",
-    monospace;
-  letter-spacing: 0.04em;
-}
-
 /* Animação Lottie (idle/working) dentro do slot — ocupa o centro do slot,
    com as órbitas e dots do design como ambiente. */
 .lottie-anim {
@@ -479,11 +466,6 @@ main.with-expanded-terminal {
 .is-paused .float-dot {
   background: #f59e0b;
   box-shadow: 0 0 0 5px rgba(245, 158, 11, 0.09);
-}
-
-.is-paused .lottie-label {
-  color: #b86f05;
-  background: color-mix(in srgb, #f59e0b 10%, var(--surface-soft));
 }
 
 .live-counter {

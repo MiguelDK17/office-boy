@@ -27,9 +27,6 @@ export function RobotVisual({
       <span className="float-dot dot-two" />
       <span className="float-dot dot-three" />
       <LottieRobot running={running} stopping={stopping} paused={paused} />
-      <span className="lottie-label">
-        {paused ? "lottie-placeholder · pausado" : "lottie-placeholder"}
-      </span>
     </div>
   );
 }
