@@ -54,14 +54,22 @@ describe('api/config — contrato', () => {
     expect(app).not.toContain('lottie-placeholder');
   });
 
-  it('OpenRouter-first: o card do agente não mais fala "compatível com a API OpenAI" como dono', () => {
+  it('OpenRouter-first: catálogo real no ModelCombobox e Gemini como fallback do AUXILIAR', () => {
     const settings = readFileSync(
       path.resolve(__dirname, '..', 'web', 'src', 'screens', 'SettingsScreen.tsx'),
       'utf-8',
     );
-    expect(settings).toMatch(/Modelo principal via OpenRouter/);
-    // Gemini legado do agente saiu da tela (o agente não usa mais; o auxiliar continua).
-    expect(settings).not.toContain('GEMINI_MODEL');
+    // O agente usa o catálogo real do OpenRouter (não um Field solto).
+    expect(settings).toContain('ModelCombobox');
+    expect(settings).not.toMatch(/Modelo principal via OpenRouter/);
+    // GEMINI_MODEL voltou — como fallback do modelo AUXILIAR (ver llm-adapter.ts).
+    // O render é dinâmico pelo grupo: o card auxiliar só exclui provider/model,
+    // então GEMINI_MODEL aparece lá; e a whitelist o declara no grupo auxiliar.
+    expect(settings).toContain('GEMINI_MODEL');
+    expect(configApi).toContain("chave: 'GEMINI_MODEL', tipo: 'texto', grupo: 'auxiliar'");
+    expect(settings).toMatch(
+      /\.get\("auxiliar"\)[\s\S]{0,200}c\.chave !== "LLM_AUX_PROVIDER" && c\.chave !== "LLM_AUX_MODEL"/,
+    );
   });
 });
 

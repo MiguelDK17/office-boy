@@ -38,6 +38,51 @@ export const salvarSites = (sites: { sites: unknown }) => salvarConfig("sites", 
 export const salvarCurriculos = (curriculos: unknown) => salvarConfig("curriculos", curriculos);
 export const salvarEnv = (valores: Record<string, string>) => salvarConfig("env", { valores });
 
+/** Modelo do catálogo OpenRouter (GET /api/config/modelos). */
+export interface ModeloCatalogo {
+  name: string;
+  id: string;
+  free: boolean;
+  context: string;
+}
+
+/** Proxy do catálogo /models do endpoint OpenAI-compatible (erro = string). */
+export async function carregarModelos(baseUrl: string): Promise<ModeloCatalogo[]> {
+  const resp = await fetch(`/api/config/modelos?baseUrl=${encodeURIComponent(baseUrl)}`);
+  const dados = (await resp.json().catch(() => ({}))) as { modelos?: ModeloCatalogo[]; mensagem?: string };
+  if (!resp.ok) throw new Error(dados.mensagem ?? `Catálogo indisponível (${resp.status})`);
+  return dados.modelos ?? [];
+}
+
+/**
+ * Upload de currículo (PDF/DOC) em base64 — grava em curriculos/ +
+ * curriculos.json. Devolve a entrada registrada (para atualizar a lista local
+ * sem recarregar o config inteiro) ou o erro.
+ */
+export async function enviarCurriculo(
+  id: string,
+  nome: string,
+  base64: string,
+): Promise<{
+  erro: string | null;
+  entrada?: { id: string; arquivo: string; foco: string; usar_quando: string };
+}> {
+  const resp = await fetch("/api/config/curriculos/arquivo", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, nome, base64 }),
+  });
+  const dados = (await resp.json().catch(() => ({}))) as {
+    mensagem?: string;
+    entrada?: { id: string; arquivo: string; foco: string; usar_quando: string };
+  };
+  return resp.ok ? { erro: null, entrada: dados.entrada } : { erro: dados.mensagem ?? "Falha no upload" };
+}
+
+/** URL para abrir/visualizar um currículo registrado. */
+export const urlCurriculo = (id: string) =>
+  `/api/config/curriculos/arquivo?id=${encodeURIComponent(id)}`;
+
 /** Corpo de GET /api/data — métricas, funil e candidaturas recentes. */
 export async function carregarDados(): Promise<ApiData> {
   const resp = await fetch("/api/data");

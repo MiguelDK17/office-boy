@@ -14,7 +14,7 @@
 // JSON é atômica (tmp + rename) para não corromper config com um crash no meio.
 
 import http from 'http';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { log } from './logger.js';
@@ -60,6 +60,9 @@ const CAMPOS_ENV: CampoEnv[] = [
   { chave: 'OPENAI_BASE_URL', tipo: 'texto', grupo: 'auxiliar' },
   { chave: 'OPENAI_API_KEY', tipo: 'texto', secreto: true, grupo: 'auxiliar' },
   { chave: 'OLLAMA_URL', tipo: 'texto', grupo: 'auxiliar' },
+  // Fallback automático do modelo auxiliar (ver src/llm-adapter.ts — o
+  // agente NÃO usa Gemini; quando o provedor principal falha, tenta Gemini)
+  { chave: 'GEMINI_MODEL', tipo: 'texto', grupo: 'auxiliar' },
   { chave: 'GEMINI_API_KEY', tipo: 'texto', secreto: true, grupo: 'auxiliar' },
   // Servidor (portas vêm do docker compose — somente leitura)
   { chave: 'BOT_UI_PORT', tipo: 'numero', somenteLeitura: true, grupo: 'servidor' },
@@ -233,6 +236,169 @@ function atualizarEnv(valores: Record<string, string>): { ok: boolean; motivo?: 
   return { ok: true };
 }
 
+// ========== CATÁLOGO DE MODELOS (OpenRouter) ==========
+
+interface ModeloResumo {
+  name: string;
+  id: string;
+  free: boolean;
+  context: string;
+}
+
+let cacheModelos: { url: string; quando: number; dados: ModeloResumo[] } | null = null;
+
+/**
+ * Proxy do catálogo /models de um endpoint OpenAI-compatible (o front não tem
+ * a chave e o navegador não resolve CORS de todos os provedores). Só aceita
+ * https e responde com a lista compacta usada pelo ModelCombobox.
+ */
+async function carregarCatalogoModelos(baseUrl: string): Promise<{ ok: boolean; modelos?: ModeloResumo[]; motivo?: string }> {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return { ok: false, motivo: 'Endereço de API inválido' };
+  }
+  if (url.protocol !== 'https:') return { ok: false, motivo: 'Somente endpoints https são suportados no catálogo' };
+  const cacheKey = url.origin;
+  if (cacheModelos && cacheModelos.url === cacheKey && Date.now() - cacheModelos.quando < 5 * 60_000) {
+    return { ok: true, modelos: cacheModelos.dados };
+  }
+  const base = baseUrl.replace(/\/+$/, '');
+  try {
+    const resp = await fetch(`${base}/models`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return { ok: false, motivo: `Catálogo respondeu ${resp.status}` };
+    const json = (await resp.json()) as { data?: Array<{ id?: string; name?: string; context_length?: number; pricing?: { prompt?: string } }> };
+    const modelos: ModeloResumo[] = (json.data ?? [])
+      .filter(m => typeof m.id === 'string')
+      .map(m => {
+        const precoPrompt = Number(m.pricing?.prompt ?? '1');
+        const context = m.context_length ?? 0;
+        return {
+          id: m.id as string,
+          name: m.name ?? (m.id as string),
+          free: Number.isFinite(precoPrompt) && precoPrompt === 0,
+          context: context >= 1_000_000 ? `${Math.round(context / 100_000) / 10}M` : `${Math.round(context / 1024)}k`,
+        };
+      });
+    if (modelos.length === 0) return { ok: false, motivo: 'Catálogo vazio' };
+    cacheModelos = { url: cacheKey, quando: Date.now(), dados: modelos };
+    return { ok: true, modelos };
+  } catch (err) {
+    return { ok: false, motivo: `Falha ao consultar ${base}/models — ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// ========== CURRÍCULOS: UPLOAD / DOWNLOAD ==========
+
+const DIR_CURRICULOS = path.resolve(__dirname, '..', 'curriculos');
+const LIMITE_UPLOAD = 15 * 1024 * 1024; // 15 MB (PDF de 10 MB ≈ 13,4 MB em base64)
+
+/** Corpo grande como Buffer (upload de PDF chega em base64 dentro de JSON). */
+function lerCorpoGrande(req: http.IncomingMessage, limite: number): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const pedacos: Buffer[] = [];
+    let tamanho = 0;
+    let estourou = false;
+    req.on('data', (c: Buffer) => {
+      if (estourou) return;
+      tamanho += c.length;
+      if (tamanho > limite) {
+        estourou = true;
+        pedacos.length = 0;
+        return;
+      }
+      pedacos.push(c);
+    });
+    req.on('end', () => resolve(estourou ? null : Buffer.concat(pedacos)));
+    req.on('error', () => resolve(null));
+  });
+}
+
+/** id seguro para nome de pasta: [a-z0-9-], 1–48 chars. */
+function idSeguro(valor: unknown): string {
+  return String(valor ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+/**
+ * Grava o PDF enviado pela UI em curriculos/<id>/<nome> e registra (ou
+ * atualiza) a entrada em curriculos.json. O "usar_quando" fica vazio para o
+ * usuário preencher — é ele que ensina o bot quando usar o currículo.
+ */
+function salvarArquivoCurriculo(corpo: unknown): { ok: boolean; motivo?: string; entrada?: { id: string; arquivo: string; foco: string; usar_quando: string } } {
+  const c = corpo as { id?: unknown; nome?: unknown; foco?: unknown; base64?: unknown };
+  const id = idSeguro(c?.id);
+  if (!id) return { ok: false, motivo: 'Upload precisa de id (slug do currículo)' };
+  const nome = String(c?.nome ?? 'Curriculo.pdf').replace(/[/\\]/g, '_').slice(0, 120) || 'Curriculo.pdf';
+  if (!/\.(pdf|docx?|txt)$/i.test(nome)) return { ok: false, motivo: 'Formato não suportado (use PDF, DOC ou DOCX)' };
+  const bruto = String(c?.base64 ?? '').replace(/^data:[^;]+;base64,/, '');
+  if (!bruto) return { ok: false, motivo: 'Upload sem conteúdo de arquivo' };
+  let dados: Buffer;
+  try {
+    dados = Buffer.from(bruto, 'base64');
+  } catch {
+    return { ok: false, motivo: 'base64 inválido' };
+  }
+  if (dados.length === 0) return { ok: false, motivo: 'Arquivo vazio' };
+  const dirAlvo = path.join(DIR_CURRICULOS, id);
+  const arquivo = path.join(dirAlvo, nome);
+  try {
+    mkdirSync(dirAlvo, { recursive: true });
+    writeFileSync(arquivo, dados);
+  } catch (err) {
+    log('ERRO', `Config: falha ao gravar currículo — ${err instanceof Error ? err.message : String(err)}`);
+    return { ok: false, motivo: 'Falha ao gravar o arquivo em curriculos/ (permissão?)' };
+  }
+  const relativo = `./curriculos/${id}/${nome}`;
+  const foco = String(c?.foco ?? '').trim() || nome.replace(/\.[^.]+$/, '');
+  const entrada = { id, arquivo: relativo, foco, usar_quando: '' };
+  const atual = lerJSON<{ fallback?: Record<string, string>; curriculos?: Array<Record<string, string>> }>(
+    path.join(DIR_CONFIG, 'curriculos.json'),
+    {},
+  );
+  const lista = Array.isArray(atual.curriculos) ? atual.curriculos : [];
+  const existente = lista.findIndex(cur => String(cur?.id) === id);
+  if (existente >= 0) lista[existente] = { ...lista[existente], arquivo: relativo, foco };
+  else lista.push(entrada);
+  try {
+    gravarJSONAtomico(path.join(DIR_CONFIG, 'curriculos.json'), { ...atual, curriculos: lista });
+  } catch (err) {
+    log('ERRO', `Config: arquivo gravado mas curriculos.json falhou — ${err instanceof Error ? err.message : String(err)}`);
+    return { ok: false, motivo: 'Arquivo gravado, mas falha ao atualizar curriculos.json' };
+  }
+  log('INFO', `Config: currículo "${id}" gravado (${dados.length} bytes) pela UI`);
+  return { ok: true, entrada };
+}
+
+/**
+ * Serve o arquivo de um currículo registrado (Visualizar). Resolve o caminho
+ * gravado no curriculos.json e GARANTE que fica dentro de curriculos/ — sem
+ * isso um id/caminho manipulado leria arquivos arbitrários do disco.
+ */
+function arquivoCurriculo(idBruto: string): { ok: boolean; caminho?: string; nome?: string; motivo?: string } {
+  const id = idSeguro(idBruto);
+  if (!id) return { ok: false, motivo: 'id inválido' };
+  const atual = lerJSON<{ curriculos?: Array<Record<string, string>> }>(
+    path.join(DIR_CONFIG, 'curriculos.json'),
+    {},
+  );
+  const entrada = (atual.curriculos ?? []).find(cur => String(cur?.id) === id);
+  const relativo = String(entrada?.arquivo ?? '');
+  if (!relativo) return { ok: false, motivo: 'Currículo não encontrado' };
+  const base = path.resolve(DIR_CURRICULOS);
+  const alvo = path.resolve(__dirname, '..', relativo.replace(/^\.\//, ''));
+  if (!alvo.startsWith(base + path.sep)) return { ok: false, motivo: 'Caminho fora de curriculos/' };
+  if (!existsSync(alvo)) return { ok: false, motivo: 'Arquivo não existe no disco' };
+  return { ok: true, caminho: alvo, nome: path.basename(alvo) };
+}
+
 // ========== ROTEADOR ==========
 
 function responderJSON(res: http.ServerResponse, codigo: number, corpo: unknown): void {
@@ -297,7 +463,60 @@ export async function rotearConfig(
   }
 
   if (metodo !== 'PUT') {
+    // ----- GET /api/config/modelos: catálogo OpenRouter p/ ModelCombobox -----
+    if (caminho === '/api/config/modelos' && metodo === 'GET') {
+      const baseUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+        .searchParams.get('baseUrl') ?? process.env.AGENT_LLM_BASE_URL ?? 'https://openrouter.ai/api/v1';
+      const catalogo = await carregarCatalogoModelos(baseUrl);
+      if (!catalogo.ok) {
+        responderJSON(res, 502, { ok: false, mensagem: catalogo.motivo ?? 'Catálogo indisponível' });
+        return true;
+      }
+      responderJSON(res, 200, { ok: true, modelos: catalogo.modelos });
+      return true;
+    }
+    // ----- GET /api/config/curriculos/arquivo?id=: Visualizar (PDF inline) -----
+    if (caminho === '/api/config/curriculos/arquivo' && metodo === 'GET') {
+      const id = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).searchParams.get('id') ?? '';
+      const arq = arquivoCurriculo(id);
+      if (!arq.ok || !arq.caminho) {
+        responderJSON(res, 404, { ok: false, mensagem: arq.motivo ?? 'Currículo não encontrado' });
+        return true;
+      }
+      const conteudo = readFileSync(arq.caminho);
+      res.writeHead(200, {
+        'Content-Type': /\.pdf$/i.test(arq.nome ?? '') ? 'application/pdf' : 'application/octet-stream',
+        'Content-Disposition': `inline; filename="${arq.nome}"`,
+        'Content-Length': conteudo.length,
+        'Cache-Control': 'no-store',
+      });
+      res.end(conteudo);
+      return true;
+    }
     responderJSON(res, 405, { ok: false, mensagem: 'Metodo nao suportado' });
+    return true;
+  }
+
+  // ----- PUT /api/config/curriculos/arquivo: upload de PDF/DOC (JSON base64) -----
+  if (caminho === '/api/config/curriculos/arquivo') {
+    const bruto = await lerCorpoGrande(req, LIMITE_UPLOAD);
+    if (bruto === null) {
+      responderJSON(res, 413, { ok: false, mensagem: 'Arquivo maior que 15 MB' });
+      return true;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bruto.toString('utf-8'));
+    } catch {
+      responderJSON(res, 400, { ok: false, mensagem: 'JSON inválido' });
+      return true;
+    }
+    const resultado = salvarArquivoCurriculo(parsed);
+    if (!resultado.ok) {
+      responderJSON(res, 400, { ok: false, mensagem: resultado.motivo ?? 'Falha no upload' });
+      return true;
+    }
+    responderJSON(res, 200, { ok: true, mensagem: 'Currículo enviado', entrada: resultado.entrada });
     return true;
   }
 

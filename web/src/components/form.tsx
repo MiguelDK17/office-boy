@@ -3,6 +3,7 @@
 // defaultValue + estado interno; aqui os valores vêm dos configs reais).
 
 import { useState } from "react";
+import { carregarModelos, type ModeloCatalogo } from "../lib/api";
 
 export type GlyphName = "check" | "eye" | "file" | "lock" | "upload";
 
@@ -92,66 +93,121 @@ export function FormCard({
   );
 }
 
-/** Campo de texto controlado. Números ficam string no input (o salvar converte). */
+/** Rótulo + nome técnico (ex.: "Meta de candidaturas <code>META_CANDIDATURAS</code>"). */
+export function RotuloCampo({ label, technicalName }: { label: string; technicalName?: string }) {
+  return (
+    <span>
+      {label}
+      {technicalName && <code>{technicalName}</code>}
+    </span>
+  );
+}
+
+/**
+ * Campo de texto controlado. Números ficam string no input (o salvar converte).
+ * `unit` renderiza o sufixo fixo (US$, ms); validação de número negativo é
+ * embutida (design: "Use um valor igual ou maior que zero.").
+ */
 export function Field({
   label,
+  technicalName,
   value,
   type = "text",
   placeholder,
+  unit,
   hint,
   badge,
   disabled,
   onChange,
 }: {
   label: string;
+  technicalName?: string;
   value: string | number;
   type?: string;
   placeholder?: string;
+  unit?: string;
   hint?: string;
   badge?: string;
   disabled?: boolean;
   onChange: (valor: string) => void;
 }) {
+  const invalido = type === "number" && String(value) !== "" && Number(value) < 0;
   return (
-    <label className="form-field">
+    <label className={`form-field ${invalido ? "field-error" : ""}`}>
       <span className="field-label">
-        {label}
+        <RotuloCampo label={label} technicalName={technicalName} />
         {badge && <small className="read-only-badge">{badge}</small>}
       </span>
-      <input
-        type={type}
-        value={value}
-        placeholder={placeholder}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-      />
-      {hint && <small className="field-hint">{hint}</small>}
+      <div className={unit ? "input-with-unit" : undefined}>
+        <input
+          type={type}
+          value={value}
+          placeholder={placeholder}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        {unit && <span>{unit}</span>}
+      </div>
+      <small className="field-hint">
+        {invalido ? "Use um valor igual ou maior que zero." : hint}
+      </small>
     </label>
   );
 }
 
+/** Dropdown customizado do design (não usa <select> nativo). */
 export function SelectField({
   label,
+  technicalName,
   value,
   options,
   onChange,
 }: {
   label: string;
+  technicalName?: string;
   value: string;
   options: string[];
   onChange: (valor: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  // fecha ao clicar fora
   return (
-    <label className="form-field">
-      <span className="field-label">{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {options.map((option) => (
-          <option value={option} key={option}>
-            {option}
-          </option>
-        ))}
-      </select>
-    </label>
+    <div className={`form-field custom-select ${open ? "custom-select-open" : ""}`}>
+      <span className="field-label">
+        <RotuloCampo label={label} technicalName={technicalName} />
+      </span>
+      <button
+        type="button"
+        className="custom-select-trigger"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+        }}
+      >
+        {value}
+        <span>⌄</span>
+      </button>
+      {open && (
+        <div className="custom-select-menu">
+          {options.map((option) => (
+            <button
+              type="button"
+              className={value === option ? "custom-option-selected" : ""}
+              onClick={() => {
+                onChange(option);
+                setOpen(false);
+              }}
+              key={option}
+            >
+              <span>{value === option ? "✓" : ""}</span>
+              {option}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -299,14 +355,16 @@ export function ActionBar({
   );
 }
 
-/** Campo de secret: nunca mostra o valor — só "definido" + botão Substituir.
+/** Campo de secret: nunca mostra o valor — badge "Configurada" + Substituir.
  *  O rascunho morre aqui dentro: "" = sem substituição pendente (não suja o form). */
 export function SecretField({
   label,
+  technicalName,
   definido,
   onChange,
 }: {
   label: string;
+  technicalName?: string;
   definido: boolean;
   onChange: (valor: string) => void;
 }) {
@@ -314,7 +372,12 @@ export function SecretField({
   const [rascunho, setRascunho] = useState("");
   return (
     <div className="form-field secret-field">
-      <span className="field-label">{label}</span>
+      <span className="field-label">
+        <RotuloCampo label={label} technicalName={technicalName} />
+        <small className={`configured-badge ${definido ? "" : "nao-configurada"}`}>
+          {definido ? "Configurada" : "Não configurada"}
+        </small>
+      </span>
       <div className="secret-control">
         {replacing ? (
           <input
@@ -329,7 +392,7 @@ export function SecretField({
           />
         ) : (
           <div className="masked-value">
-            {definido ? "••••••••••••••••" : "não definido"}
+            {definido ? "••••••••••••••••" : "—"}
           </div>
         )}
         <button
@@ -345,6 +408,178 @@ export function SecretField({
           {replacing ? "Cancelar" : "Substituir"}
         </button>
       </div>
+    </div>
+  );
+}
+
+// ========== MODEL COMBOBOX (catálogo OpenRouter) ==========
+
+type StatusModelos = "pronto" | "carregando" | "erro";
+
+/**
+ * Seletor de modelo do design: quando o endereço da API é OpenRouter, mostra
+ * o catálogo real (busca + filtro "somente grátis" + estados loading/erro/
+ * vazio) com "Digitar manualmente" e "Atualizar catálogo". Para endpoints
+ * não-OpenRouter (OpenAI nativa, Ollama) cai num Field manual — catálogo
+ * padrão não existe lá.
+ */
+export function ModelCombobox({
+  label = "Modelo",
+  technicalName,
+  apiAddress,
+  value,
+  onChange,
+}: {
+  label?: string;
+  technicalName: string;
+  apiAddress: string;
+  value: string;
+  onChange: (valor: string) => void;
+}) {
+  const isOpenRouter = apiAddress.toLowerCase().includes("openrouter");
+  const [open, setOpen] = useState(false);
+  const [manual, setManual] = useState(false);
+  const [status, setStatus] = useState<StatusModelos>("pronto");
+  const [freeOnly, setFreeOnly] = useState(false);
+  const [query, setQuery] = useState("");
+  const [catalogo, setCatalogo] = useState<ModeloCatalogo[] | null>(null);
+  const [erroCatalogo, setErroCatalogo] = useState<string | null>(null);
+
+  // manual: campo livre (id do modelo) — também é o caminho p/ não-OpenRouter
+  if (!isOpenRouter || manual) {
+    return (
+      <div className="manual-model-field">
+        <Field
+          label={label}
+          technicalName={technicalName}
+          value={value}
+          hint="Informe o id do modelo do seu provedor."
+          onChange={onChange}
+        />
+        {manual && isOpenRouter && (
+          <button type="button" className="return-combobox" onClick={() => setManual(false)}>
+            Voltar para a lista de modelos
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  const filtrados = (catalogo ?? []).filter(
+    (m) =>
+      (!freeOnly || m.free) &&
+      (m.name.toLowerCase().includes(query.toLowerCase()) ||
+        m.id.toLowerCase().includes(query.toLowerCase())),
+  );
+
+  const abrirFechar = async () => {
+    const proximo = !open;
+    setOpen(proximo);
+    if (proximo && catalogo === null && status !== "carregando") {
+      setStatus("carregando");
+      setErroCatalogo(null);
+      try {
+        setCatalogo(await carregarModelos(apiAddress));
+        setStatus("pronto");
+      } catch (e) {
+        setErroCatalogo(e instanceof Error ? e.message : "Falha no catálogo");
+        setStatus("erro");
+      }
+    }
+  };
+
+  const recarregar = async () => {
+    setStatus("carregando");
+    setErroCatalogo(null);
+    try {
+      setCatalogo(await carregarModelos(apiAddress));
+      setStatus("pronto");
+    } catch (e) {
+      setErroCatalogo(e instanceof Error ? e.message : "Falha no catálogo");
+      setStatus("erro");
+    }
+  };
+
+  return (
+    <div className={`model-combobox field-wide ${open ? "combobox-open" : ""}`}>
+      <span className="field-label">
+        <RotuloCampo label={label} technicalName={technicalName} />
+      </span>
+      <button type="button" className="model-trigger" onClick={() => void abrirFechar()} aria-expanded={open}>
+        <span>
+          <strong>{value || "Escolha um modelo"}</strong>
+          <code>{value}</code>
+        </span>
+        <span className="model-chevron">⌄</span>
+      </button>
+      {open && (
+        <div className="model-dropdown">
+          <div className="model-search">
+            <input
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Buscar por nome ou id…"
+            />
+          </div>
+          <div className="model-filter">
+            <span>Somente grátis</span>
+            <Toggle checked={freeOnly} onChange={setFreeOnly} />
+          </div>
+          {status === "carregando" ? (
+            <div className="model-state">
+              <span className="model-spinner" />
+              <strong>Buscando modelos…</strong>
+              <small>Consultando o catálogo do provedor</small>
+            </div>
+          ) : status === "erro" ? (
+            <div className="model-state model-error">
+              <strong>Não foi possível carregar os modelos</strong>
+              <small>{erroCatalogo ?? "Verifique o endereço da API e tente novamente."}</small>
+              <div>
+                <button type="button" onClick={() => void recarregar()}>
+                  Tentar de novo
+                </button>
+                <button type="button" className="manual-link" onClick={() => setManual(true)}>
+                  Digitar manualmente
+                </button>
+              </div>
+            </div>
+          ) : filtrados.length === 0 ? (
+            <div className="model-state">
+              <strong>Nenhum modelo encontrado</strong>
+              <small>Tente buscar por outro nome ou id.</small>
+            </div>
+          ) : (
+            <div className="model-list">
+              {filtrados.map((modelo) => (
+                <button
+                  type="button"
+                  className={value === modelo.id ? "model-selected" : ""}
+                  onClick={() => {
+                    onChange(modelo.id);
+                    setOpen(false);
+                  }}
+                  key={modelo.id}
+                >
+                  <span className="model-check">{value === modelo.id ? "✓" : ""}</span>
+                  <span className="model-option-copy">
+                    <strong>{modelo.name}</strong>
+                    <code>{modelo.id}</code>
+                  </span>
+                  <span className="model-tags">
+                    {modelo.free && <small>Grátis</small>}
+                    <small>{modelo.context}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+          <button type="button" className="refresh-models" onClick={() => void recarregar()}>
+            Atualizar catálogo
+          </button>
+        </div>
+      )}
     </div>
   );
 }

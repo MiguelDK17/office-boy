@@ -2,10 +2,10 @@
 // (GET /api/config → PUT /api/config/env) e dos sites (config/sites.json).
 //
 // OpenRouter-first (decisão do projeto):
-//   • O agente é "via OpenRouter" por padrão — a API OpenAI nativa é só uma
-//     das opções (o .env.example documenta as duas).
-//   • As vars legadas de Gemini do agente saíram da tela — o agente não usa
-//     mais Gemini; o auxiliar continua suportando o provider.
+//   • O agente usa o catálogo real do OpenRouter (ModelCombobox) — a API OpenAI
+//     nativa é só uma das opções (o .env.example documenta as duas).
+//   • GEMINI_MODEL/GEMINI_API_KEY são o fallback do MODELO AUXILIAR (ver
+//     src/llm-adapter.ts) — ficam no card "Modelo auxiliar".
 //   • Portas do Docker/BOT_* são somente leitura (definidas no compose).
 //
 // Save de .env exige REINICIALIZAÇÃO (dotenv lê uma vez só) — banner amarelo.
@@ -18,6 +18,7 @@ import {
   Field,
   FormCard,
   Glyph,
+  ModelCombobox,
   ScreenHeader,
   SecretField,
   SelectField,
@@ -25,6 +26,53 @@ import {
 } from "../components/form";
 
 type Valores = Record<string, string | number | boolean | null>;
+
+/** Rótulos humanos + código técnico (design: label amigável + <code>VAR</code>). */
+const ROTULOS_ENV: Record<string, { label: string; unit?: string; hint?: string }> = {
+  LIMITE_DIARIO: { label: "Limite diário de candidaturas" },
+  MAX_POR_EXECUCAO: { label: "Máximo por execução" },
+  MAX_ITERACOES: { label: "Máximo de interações", hint: "Vazio usa o padrão (500)." },
+  META_CANDIDATURAS: {
+    label: "Meta de candidaturas",
+    hint: "Encerra a run ao atingir a meta. Use 0 para desativar.",
+  },
+  SCORE_MINIMO: { label: "Score mínimo para candidatar" },
+  CUSTO_MAX_USD: { label: "Custo máximo por run", unit: "US$", hint: "Use 0 para desativar." },
+  DELAY_MIN: { label: "Pausa mínima entre ações", unit: "ms" },
+  DELAY_MAX: { label: "Pausa máxima entre ações", unit: "ms" },
+  AGENT_LLM_BASE_URL: { label: "Endereço da API" },
+  AGENT_LLM_API_KEY: { label: "Chave da API" },
+  AGENT_LLM_MODEL: { label: "Modelo" },
+  LLM_AUX_PROVIDER: { label: "Provedor" },
+  LLM_AUX_MODEL: { label: "Modelo" },
+  OPENAI_BASE_URL: { label: "Endereço da API auxiliar" },
+  OPENAI_API_KEY: { label: "Chave da API auxiliar" },
+  OLLAMA_URL: { label: "Endereço local do Ollama" },
+  GEMINI_MODEL: { label: "Modelo Gemini de fallback" },
+  GEMINI_API_KEY: { label: "Chave Gemini" },
+  BOT_UI_PORT: { label: "Porta da interface" },
+  BOT_NOVNC_PORT: { label: "Porta do navegador remoto" },
+  BOT_CDP_PORT: { label: "Porta de depuração do Chrome" },
+  DASHBOARD_PORT: { label: "Porta do dashboard" },
+  DASHBOARD_HOST: { label: "Host do dashboard" },
+  CDP_ENDPOINT: { label: "Endpoint do Chrome" },
+  TELEGRAM_BOT_TOKEN: { label: "Token do bot do Telegram" },
+  TELEGRAM_CHAT_ID: { label: "Identificador da conversa" },
+  SMTP_HOST: { label: "Servidor de e-mail" },
+  SMTP_PORT: { label: "Porta do servidor de e-mail" },
+  SMTP_USER: { label: "Usuário do e-mail" },
+  SMTP_PASS: { label: "Senha do e-mail" },
+  EMAIL_DESTINATARIO: { label: "E-mail de destino" },
+  CRON_HORARIO: { label: "Horário da execução" },
+};
+
+/** Descrições dos toggles (design: nome amigável + <code>VAR</code> + legenda). */
+const ROTULOS_TOGGLE: Record<string, { label: string; descricao: string }> = {
+  DRY_RUN: { label: "Modo simulação", descricao: "Simula as candidaturas sem enviar." },
+  PAUSAR_EM_LOGIN: { label: "Pausar ao detectar login", descricao: "O bot para e espera você entrar na conta." },
+  CONTROL_MODE: { label: "Modo de controle", descricao: "Inicia somente o dashboard, sem executar o agente." },
+  CRON_ATIVO: { label: "Agendamento automático", descricao: "Executa o bot no horário definido." },
+};
 
 /** Valor inicial de um campo ("" para secret — nunca pré-preenchido). */
 function inicial(campo: CampoEnv): string | number | boolean | null {
@@ -152,38 +200,52 @@ export function SettingsScreen({
   const campo = (chave: string): CampoEnv | undefined =>
     env.find((c) => c.chave === chave);
 
-  const renderNumero = (c: CampoEnv, hint?: string) => (
-    <Field
-      key={c.chave}
-      label={c.chave}
-      type="number"
-      value={String(valores[c.chave] ?? "")}
-      hint={hint}
-      disabled={c.somenteLeitura}
-      badge={c.somenteLeitura ? "somente leitura" : undefined}
-      onChange={(v) => setCampo(c, v)}
-    />
-  );
+  const rotulo = (c: CampoEnv) => ROTULOS_ENV[c.chave] ?? { label: c.chave };
 
-  const renderTexto = (c: CampoEnv, hint?: string) =>
-    c.secreto ? (
-      <SecretField
-        key={c.chave}
-        label={`${c.chave}${c.definido ? " · definido" : " · não definido"}`}
-        definido={c.definido}
-        onChange={(v) => setSecret(c, v)}
-      />
-    ) : (
+  const renderNumero = (c: CampoEnv, hint?: string) => {
+    const r = rotulo(c);
+    return (
       <Field
         key={c.chave}
-        label={c.chave}
+        label={r.label}
+        technicalName={c.chave}
+        type="number"
         value={String(valores[c.chave] ?? "")}
-        hint={hint}
+        unit={r.unit}
+        hint={hint ?? r.hint}
         disabled={c.somenteLeitura}
         badge={c.somenteLeitura ? "somente leitura" : undefined}
         onChange={(v) => setCampo(c, v)}
       />
     );
+  };
+
+  const renderTexto = (c: CampoEnv, hint?: string) => {
+    const r = rotulo(c);
+    if (c.secreto) {
+      return (
+        <SecretField
+          key={c.chave}
+          label={r.label}
+          technicalName={c.chave}
+          definido={c.definido}
+          onChange={(v) => setSecret(c, v)}
+        />
+      );
+    }
+    return (
+      <Field
+        key={c.chave}
+        label={r.label}
+        technicalName={c.chave}
+        value={String(valores[c.chave] ?? "")}
+        hint={hint ?? r.hint}
+        disabled={c.somenteLeitura}
+        badge={c.somenteLeitura ? "somente leitura" : undefined}
+        onChange={(v) => setCampo(c, v)}
+      />
+    );
+  };
 
   // Despacha por tipo declarado do campo — evita SMTP_PORT virar input de
   // texto (o que, somado à comparação fraca, disparava PUT sem mudança real).
@@ -192,19 +254,24 @@ export function SettingsScreen({
     if (c.tipo === "booleano") return renderBooleano(c, hint ?? "Ativar");
     return renderTexto(c, hint);
   };
-  const renderBooleano = (c: CampoEnv, descricao: string) => (
-    <div className="toggle-field" key={c.chave}>
-      <span>
-        <b>{c.chave}</b>
-        <small>{descricao}</small>
-      </span>
-      <Toggle
-        checked={valores[c.chave] === true}
-        disabled={c.somenteLeitura}
-        onChange={(checked) => setCampo(c, checked)}
-      />
-    </div>
-  );
+  const renderBooleano = (c: CampoEnv) => {
+    const r = ROTULOS_TOGGLE[c.chave] ?? { label: c.chave, descricao: "" };
+    return (
+      <div className="toggle-field" key={c.chave}>
+        <span>
+          <b>
+            {r.label} <code>{c.chave}</code>
+          </b>
+          <small>{r.descricao}</small>
+        </span>
+        <Toggle
+          checked={valores[c.chave] === true}
+          disabled={c.somenteLeitura}
+          onChange={(checked) => setCampo(c, checked)}
+        />
+      </div>
+    );
+  };
 
   return (
     <div className="screen-view settings-screen">
@@ -231,7 +298,7 @@ export function SettingsScreen({
       <ScreenHeader
         eyebrow="PREFERÊNCIAS DO SISTEMA"
         title="Configurações"
-        description="Valores reais do arquivo .env. Alterações entram em vigor na próxima inicialização do bot."
+        description="Ajuste como o bot trabalha. As mudanças valem a partir da próxima vez que você iniciar o bot."
       />
 
       {restartNeeded && (
@@ -256,27 +323,34 @@ export function SettingsScreen({
       )}
 
       <div className="settings-layout">
-        <FormCard title="Execução" description="Limites, ritmo e comportamento de cada run.">
+        <FormCard title="Execução" description="Defina limites, ritmo e custo de cada run.">
           <div className="field-grid settings-fields">
             {porGrupo.get("execucao")?.map((c) =>
-              c.tipo === "booleano"
-                ? renderBooleano(
-                    c,
-                    c.chave === "DRY_RUN"
-                      ? "Simula sem enviar"
-                      : "Pausa ao detectar login",
-                  )
-                : renderNumero(c, c.chave === "CUSTO_MAX_USD" ? "USD por run (0 = off)" : c.chave === "META_CANDIDATURAS" ? "Encerra o run com sucesso (0 = off)" : undefined),
+              c.tipo === "booleano" ? renderBooleano(c) : renderNumero(c),
             )}
           </div>
         </FormCard>
 
         <FormCard
           title="Agente de navegação"
-          description="Modelo principal via OpenRouter (API compatível com OpenAI — troque AGENT_LLM_BASE_URL para usar OpenAI nativa ou Ollama local)."
+          description="O modelo de IA que decide o que fazer em cada página. OpenRouter-first — troque o Endereço da API para usar OpenAI nativa ou Ollama."
         >
           <div className="field-grid settings-fields">
-            {porGrupo.get("agente")?.map((c) => renderTexto(c, c.chave === "AGENT_LLM_MODEL" ? "Formato openrouter: provedor/modelo" : undefined))}
+            {porGrupo
+              .get("agente")
+              ?.filter((c) => c.chave !== "AGENT_LLM_MODEL")
+              .map((c) => renderCampo(c))}
+            {/* ModelCombobox: catálogo real do OpenRouter com busca + filtro
+                "somente grátis"; endpoint não-OpenRouter cai em campo manual. */}
+            <ModelCombobox
+              technicalName="AGENT_LLM_MODEL"
+              apiAddress={String(valores.AGENT_LLM_BASE_URL ?? "https://openrouter.ai/api/v1")}
+              value={String(valores.AGENT_LLM_MODEL ?? "")}
+              onChange={(v) => {
+                const c = campo("AGENT_LLM_MODEL");
+                if (c) setCampo(c, v);
+              }}
+            />
           </div>
           <div className="secret-note">
             <Glyph name="lock" size={15} /> Valores secretos nunca são exibidos nem enviados de volta
@@ -285,42 +359,43 @@ export function SettingsScreen({
 
         <FormCard
           title="Modelo auxiliar"
-          description="Gera currículo tailored, cover letter e mensagens (pode ser um provedor diferente do agente)."
+          description="Escreve currículo adaptado, carta de apresentação e mensagens. Pode usar outro provedor."
         >
           <div className="field-grid settings-fields">
             <SelectField
-              label="LLM_AUX_PROVIDER"
+              label="Provedor"
+              technicalName="LLM_AUX_PROVIDER"
               value={String(valores.LLM_AUX_PROVIDER ?? "openai")}
               // valor atual pode estar fora das 3 opções conhecidas (ex.:
-              // "openrouter") — incluí-lo evita o select renderizar em branco
+              // "openrouter") — incluí-lo evita o dropdown renderizar em branco
               options={[...new Set(["openai", "ollama", "gemini", String(valores.LLM_AUX_PROVIDER ?? "openai")])]}
               onChange={(v) => {
                 const c = campo("LLM_AUX_PROVIDER");
                 if (c) setCampo(c, v);
               }}
             />
+            <ModelCombobox
+              technicalName="LLM_AUX_MODEL"
+              apiAddress={String(valores.OPENAI_BASE_URL ?? "https://openrouter.ai/api/v1")}
+              value={String(valores.LLM_AUX_MODEL ?? "")}
+              onChange={(v) => {
+                const c = campo("LLM_AUX_MODEL");
+                if (c) setCampo(c, v);
+              }}
+            />
             {porGrupo
               .get("auxiliar")
-              ?.filter((c) => c.chave !== "LLM_AUX_PROVIDER")
-              .map((c) =>
-                renderTexto(
-                  c,
-                  c.chave === "OPENAI_BASE_URL"
-                    ? "Endpoint OpenAI-compatible (OpenRouter é o padrão do projeto)"
-                    : undefined,
-                ),
-              )}
+              ?.filter((c) => c.chave !== "LLM_AUX_PROVIDER" && c.chave !== "LLM_AUX_MODEL")
+              .map((c) => renderCampo(c))}
           </div>
           <div className="secret-note">
             <Glyph name="lock" size={15} /> Valores secretos nunca são exibidos nem enviados de volta
           </div>
         </FormCard>
 
-        <FormCard title="Servidor" description="Portas e endpoints locais do Office Boy.">
+        <FormCard title="Servidor" description="Endereços locais usados pelo Office Boy.">
           <div className="field-grid settings-fields">
-            {porGrupo.get("servidor")?.map((c) =>
-              renderCampo(c, c.chave === "CDP_ENDPOINT" ? "Chrome remoto do bot" : undefined),
-            )}
+            {porGrupo.get("servidor")?.map((c) => renderCampo(c))}
           </div>
         </FormCard>
 
@@ -335,15 +410,13 @@ export function SettingsScreen({
 
         <FormCard title="Agendamento" description="Execução automática em horário definido.">
           <div className="field-grid settings-fields">
-            {porGrupo.get("cron")?.map((c) =>
-              renderCampo(c, c.chave === "CRON_HORARIO" ? "Formato HH:MM" : undefined),
-            )}
+            {porGrupo.get("cron")?.map((c) => renderCampo(c))}
           </div>
         </FormCard>
 
         <FormCard
           title="Sites de vagas"
-          description="Fontes consultadas durante cada run (config/sites.json)."
+          description="Fontes consultadas durante cada run."
           className="full-card"
         >
           <div className="sites-list">

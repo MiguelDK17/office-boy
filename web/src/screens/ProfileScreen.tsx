@@ -7,8 +7,9 @@
 //     editável (foco/arquivo/usar_quando) e salva em curriculos.json.
 //   • Nível de inglês usa os valores do backend (nenhum/basico/.../fluente).
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UseConfig } from "../hooks/useConfig";
+import { enviarCurriculo, urlCurriculo } from "../lib/api";
 import {
   ActionBar,
   ChipField,
@@ -82,6 +83,74 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
     setDirty(true);
     setSaved(false);
     setErroSalvar(null);
+  };
+
+  // ========== UPLOAD DE CURRÍCULO ==========
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [idTrocar, setIdTrocar] = useState<string | null>(null); // null = currículo novo
+  const [enviando, setEnviando] = useState(false);
+  const [erroUpload, setErroUpload] = useState<string | null>(null);
+
+  /** id seguro: nome do arquivo em slug (mesma regra do backend). */
+  const slugCurriculo = (nome: string) =>
+    nome
+      .replace(/\.[^.]+$/, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "curriculo";
+
+  const abrirUpload = (id: string | null) => {
+    setIdTrocar(id);
+    fileInputRef.current?.click();
+  };
+
+  const processarArquivo = async (file: File) => {
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      setErroUpload("Arquivo maior que 10 MB.");
+      return;
+    }
+    if (!/\.(pdf|docx?|txt)$/i.test(file.name)) {
+      setErroUpload("Formato não suportado — use PDF, DOC ou DOCX.");
+      return;
+    }
+    setEnviando(true);
+    setErroUpload(null);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const leitor = new FileReader();
+        leitor.onload = () => resolve(String(leitor.result).split(",")[1] ?? "");
+        leitor.onerror = () => reject(new Error("Falha ao ler o arquivo"));
+        leitor.readAsDataURL(file);
+      });
+      // "Trocar" reusa o id da linha (substitui o arquivo); novo currículo
+      // deriva o id do nome — o backend registra em curriculos.json.
+      const id = idTrocar ?? slugCurriculo(file.name);
+      const resultado = await enviarCurriculo(id, file.name, base64);
+      if (resultado.erro) {
+        setErroUpload(resultado.erro);
+      } else if (resultado.entrada) {
+        // atualiza só a lista de currículos — NÃO recarregar o config inteiro,
+        // pois descartaria edições não salvas do formulário
+        const entrada = resultado.entrada;
+        setCurriculos((atual) => {
+          const lista = Array.isArray(atual.curriculos) ? atual.curriculos : [];
+          const i = lista.findIndex((c) => String(c.id) === entrada.id);
+          const novaLista =
+            i >= 0 ? lista.map((c, j) => (j === i ? { ...c, ...entrada } : c)) : [...lista, entrada];
+          return { ...atual, curriculos: novaLista };
+        });
+        setSaved(true);
+        window.setTimeout(() => setSaved(false), 3000);
+      }
+    } catch (e) {
+      setErroUpload(e instanceof Error ? e.message : "Falha ao ler o arquivo");
+    } finally {
+      setEnviando(false);
+      setIdTrocar(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   async function salvar() {
@@ -528,13 +597,59 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
                     }}
                   />
                 </div>
+                <div className="resume-actions">
+                  <button type="button" onClick={() => abrirUpload(String(cur.id ?? ""))}>
+                    Trocar
+                  </button>
+                  <button
+                    type="button"
+                    className="view-button"
+                    onClick={() => window.open(urlCurriculo(String(cur.id ?? "")), "_blank")}
+                  >
+                    <Glyph name="eye" size={15} /> Visualizar
+                  </button>
+                </div>
               </div>
             ))}
           </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.doc,.docx,.txt"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void processarArquivo(f);
+            }}
+          />
+          <button
+            type="button"
+            className="upload-zone"
+            disabled={enviando}
+            onClick={() => abrirUpload(null)}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              const f = e.dataTransfer.files?.[0];
+              if (f) void processarArquivo(f);
+            }}
+          >
+            <span>
+              <Glyph name="upload" size={22} />
+            </span>
+            <strong>
+              {enviando ? "Enviando currículo…" : "Arraste um currículo ou clique para enviar"}
+            </strong>
+            <small>PDF, DOC ou DOCX · máximo 10 MB</small>
+          </button>
+          {erroUpload && (
+            <p className="field-hint" role="alert" style={{ marginTop: 8 }}>
+              {erroUpload}
+            </p>
+          )}
           <p className="field-hint" style={{ marginTop: 10 }}>
-            Para enviar um currículo novo, adicione o PDF na pasta <code>curriculos/</code> (montada
-            no container) e registre o caminho aqui. O bot nunca escolhe "o ativo" — ele casa a vaga
-            com o usar_quando.
+            O bot escolhe automaticamente a melhor versão pelo campo{" "}
+            <code>usar_quando</code> — nunca existe um "currículo ativo" fixo.
           </p>
         </FormCard>
       </div>
