@@ -117,6 +117,26 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
 
   return (
     <div className="screen-view profile-screen">
+      {cfg.erro && !cfg.config && (
+        <div className="restart-banner" role="alert">
+          <span className="restart-mark">!</span>
+          <div>
+            <strong>Falha ao carregar o perfil</strong>
+            <p>{cfg.erro} — o backend pode estar fora do ar.</p>
+          </div>
+          <button onClick={() => void cfg.recarregar()}>Tentar de novo</button>
+        </div>
+      )}
+      {cfg.carregando && !cfg.config && (
+        <div className="restart-banner" role="status">
+          <span className="restart-mark">…</span>
+          <div>
+            <strong>Carregando perfil</strong>
+            <p>Buscando perfil.json, respostas.json e currículos no backend.</p>
+          </div>
+        </div>
+      )}
+
       <ScreenHeader
         eyebrow="PERFIL DO CANDIDATO"
         title="Seu perfil profissional"
@@ -138,7 +158,8 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
             <Field
               label="Anos de experiência"
               type="number"
-              value={str(p, "anos_experiencia") || "0"}
+              // vazio permitido — o save converte "" para 0
+              value={str(p, "anos_experiencia")}
               onChange={(v) => set("anos_experiencia", v)}
             />
             <SelectField
@@ -454,7 +475,8 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
               </div>
             )}
             {listaCurriculos.map((cur, index) => (
-              <div className="resume-row" key={cur.id ?? index}>
+              // id pode se repetir em teoria — index garante key única
+              <div className="resume-row" key={`${cur.id}-${index}`}>
                 <span className="resume-icon">
                   <Glyph name="file" />
                 </span>
@@ -510,8 +532,9 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
             ))}
           </div>
           <p className="field-hint" style={{ marginTop: 10 }}>
-            Para enviar um currículo novo, adicione o PDF na pasta <code>config/curriculos/</code> e
-            registre o caminho aqui. O bot nunca escolhe "o ativo" — ele casa a vaga com o usar_quando.
+            Para enviar um currículo novo, adicione o PDF na pasta <code>curriculos/</code> (montada
+            no container) e registre o caminho aqui. O bot nunca escolhe "o ativo" — ele casa a vaga
+            com o usar_quando.
           </p>
         </FormCard>
       </div>

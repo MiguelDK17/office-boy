@@ -223,13 +223,16 @@ export function ChipField({
     <div className="form-field field-wide">
       <span className="field-label">{label}</span>
       <div className="chip-editor">
-        {values.map((chip) => (
-          <span className="edit-chip" key={chip}>
+        {/* key e remoção por ÍNDICE: chips duplicados são legítimos
+            (ex.: duas empresas bloqueadas com o mesmo nome) e um filtro
+            por valor removeria todas as ocorrências de uma vez. */}
+        {values.map((chip, index) => (
+          <span className="edit-chip" key={`${index}-${chip}`}>
             {chip}
             <button
               type="button"
               aria-label={`Remover ${chip}`}
-              onClick={() => onChange(values.filter((item) => item !== chip))}
+              onClick={() => onChange(values.filter((_, i) => i !== index))}
             >
               ×
             </button>

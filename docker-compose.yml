@@ -74,6 +74,10 @@ services:
     profiles: ["container"]
     restart: unless-stopped
     ports:
+      # ATENÇÃO: 0.0.0.0 expõe a UI (candidaturas, perfil e PII de
+      # respostas.json) para a rede toda. Só use este modo em rede confiável
+      # e considere DASHBOARD_TOKEN no .env (PUT /api/config/* exige o header
+      # X-Config-Token quando definido).
       - "${BOT_UI_PORT:-1717}:3000"
       - "${BOT_NOVNC_PORT:-7900}:7900"
     environment:

@@ -224,16 +224,24 @@ export default function App() {
         </div>
       </header>
 
-      {activeTab === "profile" ? (
-        <main className="tab-content tab-form-screen">
-          <ProfileScreen cfg={cfg} />
-        </main>
-      ) : activeTab === "settings" ? (
-        <main className="tab-content tab-form-screen">
-          <SettingsScreen cfg={cfg} onReiniciarBot={() => setActiveTab("run")} />
-        </main>
-      ) : (
-      <main className={terminalExpanded ? "tab-content tab-run with-expanded-terminal" : "tab-content tab-run"}>
+      {/* As 3 telas ficam MONTADAS (escondidas com display:none): trocar de aba
+          não descarta edições dirty nem o banner de reinicialização. */}
+      <main
+        className="tab-content tab-form-screen"
+        style={activeTab === "profile" ? undefined : { display: "none" }}
+      >
+        <ProfileScreen cfg={cfg} />
+      </main>
+      <main
+        className="tab-content tab-form-screen"
+        style={activeTab === "settings" ? undefined : { display: "none" }}
+      >
+        <SettingsScreen cfg={cfg} onReiniciarBot={() => setActiveTab("run")} />
+      </main>
+      <main
+        className={terminalExpanded ? "tab-content tab-run with-expanded-terminal" : "tab-content tab-run"}
+        style={activeTab === "run" ? undefined : { display: "none" }}
+      >
         <section className="hero-card" aria-labelledby="hero-title">
           <div className="hero-heading">
             <span className="eyebrow">
@@ -509,7 +517,6 @@ export default function App() {
           </div>
         </div>
       </main>
-      )}
 
       {activeTab === "run" && (
         <TerminalPanel

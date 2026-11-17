@@ -66,8 +66,11 @@ const CAMPOS_ENV: CampoEnv[] = [
   { chave: 'BOT_NOVNC_PORT', tipo: 'numero', somenteLeitura: true, grupo: 'servidor' },
   { chave: 'BOT_CDP_PORT', tipo: 'numero', somenteLeitura: true, grupo: 'servidor' },
   { chave: 'DASHBOARD_PORT', tipo: 'numero', somenteLeitura: true, grupo: 'servidor' },
-  { chave: 'DASHBOARD_HOST', tipo: 'texto', grupo: 'servidor' },
-  { chave: 'CDP_ENDPOINT', tipo: 'texto', grupo: 'servidor' },
+  // DASHBOARD_HOST e CDP_ENDPOINT são sobrescritos pelo environment: do
+  // docker compose (que vence o env_file) — editar na UI não teria efeito.
+  { chave: 'DASHBOARD_HOST', tipo: 'texto', somenteLeitura: true, grupo: 'servidor' },
+  { chave: 'CDP_ENDPOINT', tipo: 'texto', somenteLeitura: true, grupo: 'servidor' },
+  { chave: 'DASHBOARD_TOKEN', tipo: 'texto', secreto: true, grupo: 'servidor' },
   { chave: 'CONTROL_MODE', tipo: 'booleano', somenteLeitura: true, grupo: 'servidor' },
   // Notificações
   { chave: 'TELEGRAM_BOT_TOKEN', tipo: 'texto', secreto: true, grupo: 'notificacoes' },
@@ -190,6 +193,12 @@ function validarCurriculos(corpo: unknown): {
  * Atualiza o .env in-place: substitui o valor das chaves conhecidas e anexa as
  * ausentes no fim. Comentários e chaves fora da whitelist são preservados.
  * Secret vazio = pular (nunca apagar por engano).
+ *
+ * NÃO é atômica de propósito: o .env é bind-mount de arquivo único no compose
+ * (./.env:/app/.env), e tmp+rename trocaria o inode — o container continuaria
+ * vendo o arquivo velho. A escrita é síncrona e ponta a ponta (sem await no
+ * meio), então não há interleaving dentro do processo. O risco residual é
+ * crash DO PROCESSO entre truncate e write; aceito e documentado.
  */
 function atualizarEnv(valores: Record<string, string>): { ok: boolean; motivo?: string } {
   if (!existsSync(ARQ_ENV)) {
@@ -202,6 +211,11 @@ function atualizarEnv(valores: Record<string, string>): { ok: boolean; motivo?: 
     if (!campo) return { ok: false, motivo: `Chave fora da whitelist: ${chave}` };
     if (campo.somenteLeitura) return { ok: false, motivo: `${chave} é somente leitura (definida no docker compose)` };
     if (campo.secreto && String(valor).trim() === '') continue; // secreto vazio = mantém o atual
+    // \n/\r no valor criaria uma nova linha no .env → injeção de variável
+    // arbitrária fora da whitelist. Valores são single-line, ponto.
+    if (/[\r\n]/.test(String(valor))) {
+      return { ok: false, motivo: `${chave}: valor não pode conter quebra de linha` };
+    }
     pendentes.set(chave, String(valor));
   }
   const tocadas = new Set<string>();
@@ -230,15 +244,21 @@ function responderJSON(res: http.ServerResponse, codigo: number, corpo: unknown)
   res.end(dados);
 }
 
-function lerCorpo(req: http.IncomingMessage): Promise<string> {
+function lerCorpo(req: http.IncomingMessage): Promise<string | null> {
   return new Promise((resolve) => {
     let dados = '';
+    let estourou = false;
     req.on('data', (c) => {
+      if (estourou) return; // descarta o excedente, mas mantém o socket vivo
       dados += c;
-      if (dados.length > 100_000) req.destroy(); // configs reais cabem em ~6 KB; 100 KB é folga
+      // configs reais cabem em ~6 KB; 100 KB é folga
+      if (dados.length > 100_000) {
+        estourou = true;
+        dados = '';
+      }
     });
-    req.on('end', () => resolve(dados));
-    req.on('error', () => resolve(''));
+    req.on('end', () => resolve(estourou ? null : dados));
+    req.on('error', () => resolve(estourou ? null : ''));
   });
 }
 
@@ -248,7 +268,8 @@ export async function rotearConfig(
   res: http.ServerResponse,
   caminho: string,
 ): Promise<boolean> {
-  if (!caminho.startsWith('/api/config')) return false;
+  // Estrito: /api/config exato ou /api/config/<rota> — /api/configfoo é 404.
+  if (caminho !== '/api/config' && !caminho.startsWith('/api/config/')) return false;
   const metodo = req.method ?? 'GET';
 
   // ----- GET: tudo que a UI de Perfil/Configurações precisa, de uma vez -----
@@ -280,7 +301,24 @@ export async function rotearConfig(
     return true;
   }
 
+  // Escrita de config é a única rota que SUBSTITUI secrets e grava PII —
+  // se DASHBOARD_TOKEN estiver definido, PUT exige o header X-Config-Token.
+  // (GET continua aberto, no padrão do resto do dashboard — o container
+  // exposto em 0.0.0.0 continua sendo um risco documentado no compose.)
+  const token = process.env.DASHBOARD_TOKEN;
+  if (token) {
+    const informado = req.headers['x-config-token'];
+    if (informado !== token) {
+      responderJSON(res, 403, { ok: false, mensagem: 'X-Config-Token ausente ou incorreto (defina DASHBOARD_TOKEN no .env)' });
+      return true;
+    }
+  }
+
   const corpo = await lerCorpo(req);
+  if (corpo === null) {
+    responderJSON(res, 413, { ok: false, mensagem: 'Corpo maior que 100 KB' });
+    return true;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(corpo || '{}');

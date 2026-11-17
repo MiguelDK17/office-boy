@@ -51,10 +51,17 @@ export function SettingsScreen({
   useEffect(() => {
     const config = cfg.config;
     if (!config) return;
+    // Com restart pendente, o process.env ainda tem os valores ANTIGOS —
+    // rehidratar faria o campo "reverter" logo após o save bem-sucedido
+    // (parece que a alteração foi descartada). Os valores locais ficam.
+    if (restartNeeded) {
+      setSiteStates(config.sites.sites.map((s) => ({ ...s })));
+      return;
+    }
     setValores(Object.fromEntries(config.env.map((campo) => [campo.chave, inicial(campo)])));
     setSiteStates(config.sites.sites.map((s) => ({ ...s })));
     setDirty(false);
-  }, [cfg.config]);
+  }, [cfg.config, restartNeeded]);
 
   const env = cfg.config?.env ?? [];
   const envDisponivel = cfg.config?.envDisponivel ?? false;
@@ -79,9 +86,10 @@ export function SettingsScreen({
   };
 
   // Secret: "" = sem substituição pendente; texto = novo valor.
+  // "" (cancelar/limpar o rascunho) NÃO suja o form — só um valor preenchido.
   const setSecret = (campo: CampoEnv, valor: string) => {
     setValores((atual) => ({ ...atual, [campo.chave]: valor }));
-    marcarDirty();
+    if (valor !== "") marcarDirty();
   };
 
   async function salvar() {
@@ -102,7 +110,12 @@ export function SettingsScreen({
         continue;
       }
       const original = campo.valor;
-      if (valor === original) continue;
+      // Normaliza ANTES de comparar: inputs numéricos chegam como string,
+      // e "10" !== 10 faria PUT do .env (e banner de restart) sem mudança real.
+      if (campo.tipo === "numero") {
+        const n = Number(valor);
+        if (Number.isFinite(n) && n === Number(original)) continue;
+      } else if (valor === original || valor === String(original ?? "")) continue;
       if (valor === null || valor === "") continue; // vazio = não tocar
       envPayload[campo.chave] =
         campo.tipo === "booleano" ? (valor ? "true" : "false") : String(valor);
@@ -118,8 +131,10 @@ export function SettingsScreen({
       }
     }
 
-    // 2) sites.json (toggles ativo/inativo + instruções editáveis abaixo)
-    const erroSites = await cfg.salvarSites({ sites: siteStates });
+    // 2) sites.json — só faz PUT se algo mudou de verdade (toggle/instruções)
+    const sitesOriginais = cfg.config?.sites.sites ?? [];
+    const sitesMudou = JSON.stringify(siteStates) !== JSON.stringify(sitesOriginais);
+    const erroSites = sitesMudou ? await cfg.salvarSites({ sites: siteStates }) : null;
 
     setSalvando(false);
     const erro = erroEnv ?? erroSites;
@@ -170,6 +185,13 @@ export function SettingsScreen({
       />
     );
 
+  // Despacha por tipo declarado do campo — evita SMTP_PORT virar input de
+  // texto (o que, somado à comparação fraca, disparava PUT sem mudança real).
+  const renderCampo = (c: CampoEnv, hint?: string) => {
+    if (c.tipo === "numero") return renderNumero(c, hint);
+    if (c.tipo === "booleano") return renderBooleano(c, hint ?? "Ativar");
+    return renderTexto(c, hint);
+  };
   const renderBooleano = (c: CampoEnv, descricao: string) => (
     <div className="toggle-field" key={c.chave}>
       <span>
@@ -186,6 +208,26 @@ export function SettingsScreen({
 
   return (
     <div className="screen-view settings-screen">
+      {cfg.erro && !cfg.config && (
+        <div className="restart-banner" role="alert">
+          <span className="restart-mark">!</span>
+          <div>
+            <strong>Falha ao carregar as configurações</strong>
+            <p>{cfg.erro} — o backend pode estar fora do ar.</p>
+          </div>
+          <button onClick={() => void cfg.recarregar()}>Tentar de novo</button>
+        </div>
+      )}
+      {cfg.carregando && !cfg.config && (
+        <div className="restart-banner" role="status">
+          <span className="restart-mark">…</span>
+          <div>
+            <strong>Carregando configurações</strong>
+            <p>Buscando .env e config/sites.json no backend.</p>
+          </div>
+        </div>
+      )}
+
       <ScreenHeader
         eyebrow="PREFERÊNCIAS DO SISTEMA"
         title="Configurações"
@@ -249,7 +291,9 @@ export function SettingsScreen({
             <SelectField
               label="LLM_AUX_PROVIDER"
               value={String(valores.LLM_AUX_PROVIDER ?? "openai")}
-              options={["openai", "ollama", "gemini"]}
+              // valor atual pode estar fora das 3 opções conhecidas (ex.:
+              // "openrouter") — incluí-lo evita o select renderizar em branco
+              options={[...new Set(["openai", "ollama", "gemini", String(valores.LLM_AUX_PROVIDER ?? "openai")])]}
               onChange={(v) => {
                 const c = campo("LLM_AUX_PROVIDER");
                 if (c) setCampo(c, v);
@@ -275,19 +319,14 @@ export function SettingsScreen({
         <FormCard title="Servidor" description="Portas e endpoints locais do Office Boy.">
           <div className="field-grid settings-fields">
             {porGrupo.get("servidor")?.map((c) =>
-              c.tipo === "booleano"
-                ? renderBooleano(c, "Definido pelo docker compose")
-                : renderTexto(
-                    c,
-                    c.chave === "CDP_ENDPOINT" ? "Chrome remoto do bot" : undefined,
-                  ),
+              renderCampo(c, c.chave === "CDP_ENDPOINT" ? "Chrome remoto do bot" : undefined),
             )}
           </div>
         </FormCard>
 
         <FormCard title="Notificações" description="Telegram e relatórios por e-mail.">
           <div className="field-grid settings-fields">
-            {porGrupo.get("notificacoes")?.map((c) => renderTexto(c))}
+            {porGrupo.get("notificacoes")?.map((c) => renderCampo(c))}
           </div>
           <div className="secret-note">
             <Glyph name="lock" size={15} /> Valores secretos nunca são exibidos nem enviados de volta
@@ -297,9 +336,7 @@ export function SettingsScreen({
         <FormCard title="Agendamento" description="Execução automática em horário definido.">
           <div className="field-grid settings-fields">
             {porGrupo.get("cron")?.map((c) =>
-              c.tipo === "booleano"
-                ? renderBooleano(c, "Agendamento automático")
-                : renderTexto(c, "Formato HH:MM"),
+              renderCampo(c, c.chave === "CRON_HORARIO" ? "Formato HH:MM" : undefined),
             )}
           </div>
         </FormCard>
@@ -311,7 +348,8 @@ export function SettingsScreen({
         >
           <div className="sites-list">
             {siteStates.map((site, index) => (
-              <div className="site-row" key={site.nome}>
+              // nome pode se repetir em teoria — index garante key única
+              <div className="site-row" key={`${site.nome}-${index}`}>
                 <div className="site-logo">{site.nome.charAt(0)}</div>
                 <div className="site-copy">
                   <strong>{site.nome}</strong>
