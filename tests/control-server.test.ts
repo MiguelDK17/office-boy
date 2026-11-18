@@ -86,6 +86,10 @@ describe('control-server — contrato da API', () => {
   const caminho = path.resolve(__dirname, '..', 'src', 'control-server.ts');
   const fonte = readFileSync(caminho, 'utf-8');
 
+  it('deixa o dry-run desligado por padrão', () => {
+    expect(fonte).toMatch(/dryRun:\s*false/);
+  });
+
   it('expõe start/stop/status/logs', () => {
     // Cenário + Ação + Validação
     expect(fonte).toContain("'/api/start'");

@@ -11,6 +11,7 @@ import { notificarErro, enviarTelegram } from './notificacoes.js';
 import { registrarUsoTokens, obterCustoTotal } from './token-tracker.js';
 import { perfilParaSystemPrompt } from './anonimizacao.js';
 import type { AgenteConfig, Perfil, SitesConfig } from './types.js';
+import { camposOpenRouter, ehOpenRouter } from './openrouter.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Teto de iterações do loop agora é configurável (AgenteConfig.maxIteracoes,
@@ -296,7 +297,7 @@ O run encerra por acao do SISTEMA (meta de qualidade atingida ou teto de iteraco
 export function criarClientAgente(config: AgenteConfig): OpenAI {
   const baseURL = config.agentLlmBaseUrl || 'https://openrouter.ai/api/v1';
   // OpenRouter recomenda identificar o app — inofensivo para outros provedores.
-  const defaultHeaders = baseURL.includes('openrouter.ai')
+  const defaultHeaders = ehOpenRouter(baseURL)
     ? { 'HTTP-Referer': 'https://github.com/MiguelDK17/officeboy', 'X-Title': 'officeboy' }
     : undefined;
   return new OpenAI({
@@ -551,12 +552,21 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
     log('AGENTE', `Iteracao ${iteracao}/${maxIter}`);
 
     try {
-      const completion = await client.chat.completions.create({
+      const requestBody = {
         model: config.agentLlmModel,
         messages: history,
         tools,
         tool_choice: 'auto',
-      });
+      } as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming;
+      // O SDK Node não suporta `extra_body` como o SDK Python. Passamos o
+      // body final por RequestOptions para que `provider` fique no nível raiz
+      // do JSON enviado ao OpenRouter.
+      const completion = await client.chat.completions.create(
+        requestBody,
+        ehOpenRouter(config.agentLlmBaseUrl)
+          ? { body: { ...requestBody, ...camposOpenRouter(config.agentLlmBaseUrl, 'price', config.openRouterSessionId) } }
+          : undefined,
+      );
 
       // Reset do contador — iteração bem sucedida
       errosConsecutivos = 0;

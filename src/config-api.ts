@@ -20,8 +20,13 @@ import { fileURLToPath } from 'url';
 import { log } from './logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIR_CONFIG = path.resolve(__dirname, '..', 'config');
-const ARQ_ENV = path.resolve(__dirname, '..', '.env');
+// Diretórios sobrescrevíveis via OFFICEBOY_DATA_DIR — usados pelos testes de
+// integração (isolam config/ e curriculos/ num tmp) sem tocar os dados reais.
+const baseDados = process.env.OFFICEBOY_DATA_DIR
+  ? path.resolve(process.env.OFFICEBOY_DATA_DIR)
+  : null;
+const DIR_CONFIG = baseDados ? path.join(baseDados, 'config') : path.resolve(__dirname, '..', 'config');
+const ARQ_ENV = baseDados ? path.join(baseDados, '.env') : path.resolve(__dirname, '..', '.env');
 
 // ========== CAMPOS DE .env EXPOSTOS NA UI (whitelist) ==========
 
@@ -260,11 +265,11 @@ async function carregarCatalogoModelos(baseUrl: string): Promise<{ ok: boolean; 
     return { ok: false, motivo: 'Endereço de API inválido' };
   }
   if (url.protocol !== 'https:') return { ok: false, motivo: 'Somente endpoints https são suportados no catálogo' };
-  const cacheKey = url.origin;
-  if (cacheModelos && cacheModelos.url === cacheKey && Date.now() - cacheModelos.quando < 5 * 60_000) {
+  // chave pela URL completa (paths diferentes = catálogos diferentes)
+  const base = baseUrl.replace(/\/+$/, '');
+  if (cacheModelos && cacheModelos.url === base && Date.now() - cacheModelos.quando < 5 * 60_000) {
     return { ok: true, modelos: cacheModelos.dados };
   }
-  const base = baseUrl.replace(/\/+$/, '');
   try {
     const resp = await fetch(`${base}/models`, {
       headers: { Accept: 'application/json' },
@@ -285,7 +290,7 @@ async function carregarCatalogoModelos(baseUrl: string): Promise<{ ok: boolean; 
         };
       });
     if (modelos.length === 0) return { ok: false, motivo: 'Catálogo vazio' };
-    cacheModelos = { url: cacheKey, quando: Date.now(), dados: modelos };
+    cacheModelos = { url: base, quando: Date.now(), dados: modelos };
     return { ok: true, modelos };
   } catch (err) {
     return { ok: false, motivo: `Falha ao consultar ${base}/models — ${err instanceof Error ? err.message : String(err)}` };
@@ -294,7 +299,7 @@ async function carregarCatalogoModelos(baseUrl: string): Promise<{ ok: boolean; 
 
 // ========== CURRÍCULOS: UPLOAD / DOWNLOAD ==========
 
-const DIR_CURRICULOS = path.resolve(__dirname, '..', 'curriculos');
+const DIR_CURRICULOS = baseDados ? path.join(baseDados, 'curriculos') : path.resolve(__dirname, '..', 'curriculos');
 const LIMITE_UPLOAD = 15 * 1024 * 1024; // 15 MB (PDF de 10 MB ≈ 13,4 MB em base64)
 
 /** Corpo grande como Buffer (upload de PDF chega em base64 dentro de JSON). */
@@ -332,20 +337,20 @@ function idSeguro(valor: unknown): string {
  * atualiza) a entrada em curriculos.json. O "usar_quando" fica vazio para o
  * usuário preencher — é ele que ensina o bot quando usar o currículo.
  */
-function salvarArquivoCurriculo(corpo: unknown): { ok: boolean; motivo?: string; entrada?: { id: string; arquivo: string; foco: string; usar_quando: string } } {
+function salvarArquivoCurriculo(corpo: unknown): { ok: boolean; motivo?: string; entrada?: { id: string; arquivo: string; foco?: string; usar_quando?: string } } {
   const c = corpo as { id?: unknown; nome?: unknown; foco?: unknown; base64?: unknown };
   const id = idSeguro(c?.id);
   if (!id) return { ok: false, motivo: 'Upload precisa de id (slug do currículo)' };
-  const nome = String(c?.nome ?? 'Curriculo.pdf').replace(/[/\\]/g, '_').slice(0, 120) || 'Curriculo.pdf';
+  // Sanitização dura: sem separadores, sem \r\n (viraria header injection no
+  // Content-Disposition e derrubaria o processo via writeHead) e sem aspas.
+  const nome =
+    String(c?.nome ?? 'Curriculo.pdf')
+      .replace(/[\r\n"\\[\]]/g, '_')
+      .slice(0, 120) || 'Curriculo.pdf';
   if (!/\.(pdf|docx?|txt)$/i.test(nome)) return { ok: false, motivo: 'Formato não suportado (use PDF, DOC ou DOCX)' };
-  const bruto = String(c?.base64 ?? '').replace(/^data:[^;]+;base64,/, '');
+  const bruto = String(c?.base64 ?? '').replace(/^data:[^;]+;base64,/, '').replace(/[^A-Za-z0-9+/=]/g, '');
   if (!bruto) return { ok: false, motivo: 'Upload sem conteúdo de arquivo' };
-  let dados: Buffer;
-  try {
-    dados = Buffer.from(bruto, 'base64');
-  } catch {
-    return { ok: false, motivo: 'base64 inválido' };
-  }
+  const dados = Buffer.from(bruto, 'base64'); // Buffer.from nunca lança; chars inválidos já foram removidos acima
   if (dados.length === 0) return { ok: false, motivo: 'Arquivo vazio' };
   const dirAlvo = path.join(DIR_CURRICULOS, id);
   const arquivo = path.join(dirAlvo, nome);
@@ -357,15 +362,22 @@ function salvarArquivoCurriculo(corpo: unknown): { ok: boolean; motivo?: string;
     return { ok: false, motivo: 'Falha ao gravar o arquivo em curriculos/ (permissão?)' };
   }
   const relativo = `./curriculos/${id}/${nome}`;
-  const foco = String(c?.foco ?? '').trim() || nome.replace(/\.[^.]+$/, '');
-  const entrada = { id, arquivo: relativo, foco, usar_quando: '' };
   const atual = lerJSON<{ fallback?: Record<string, string>; curriculos?: Array<Record<string, string>> }>(
     path.join(DIR_CONFIG, 'curriculos.json'),
     {},
   );
   const lista = Array.isArray(atual.curriculos) ? atual.curriculos : [];
   const existente = lista.findIndex(cur => String(cur?.id) === id);
-  if (existente >= 0) lista[existente] = { ...lista[existente], arquivo: relativo, foco };
+  const focoSugerido = String(c?.foco ?? '').trim() || nome.replace(/\.[^.]+$/, '');
+  // "Trocar" troca só o arquivo — preserva foco e usar_quando escritos pelo
+  // usuário (a entrada devolvida é a pós-merge completa; a UI substitui a
+  // linha inteira por ela). Entrada nova: foco derivado, usar_quando vazio
+  // para o usuário preencher.
+  const entrada: Record<string, string> =
+    existente >= 0
+      ? { ...lista[existente], id, arquivo: relativo }
+      : { id, arquivo: relativo, foco: focoSugerido, usar_quando: '' };
+  if (existente >= 0) lista[existente] = entrada;
   else lista.push(entrada);
   try {
     gravarJSONAtomico(path.join(DIR_CONFIG, 'curriculos.json'), { ...atual, curriculos: lista });
@@ -374,7 +386,7 @@ function salvarArquivoCurriculo(corpo: unknown): { ok: boolean; motivo?: string;
     return { ok: false, motivo: 'Arquivo gravado, mas falha ao atualizar curriculos.json' };
   }
   log('INFO', `Config: currículo "${id}" gravado (${dados.length} bytes) pela UI`);
-  return { ok: true, entrada };
+  return { ok: true, entrada: { ...entrada, id: String(entrada.id), arquivo: String(entrada.arquivo) } };
 }
 
 /**
@@ -392,8 +404,11 @@ function arquivoCurriculo(idBruto: string): { ok: boolean; caminho?: string; nom
   const entrada = (atual.curriculos ?? []).find(cur => String(cur?.id) === id);
   const relativo = String(entrada?.arquivo ?? '');
   if (!relativo) return { ok: false, motivo: 'Currículo não encontrado' };
+  // resolve relativo à raiz de dados (repo ou OFFICEBOY_DATA_DIR) e GARANTE
+  // que fica dentro de curriculos/ — sem isso um caminho manipulado leria
+  // arquivos arbitrários do disco
   const base = path.resolve(DIR_CURRICULOS);
-  const alvo = path.resolve(__dirname, '..', relativo.replace(/^\.\//, ''));
+  const alvo = path.resolve(DIR_CURRICULOS, '..', relativo.replace(/^\.\//, ''));
   if (!alvo.startsWith(base + path.sep)) return { ok: false, motivo: 'Caminho fora de curriculos/' };
   if (!existsSync(alvo)) return { ok: false, motivo: 'Arquivo não existe no disco' };
   return { ok: true, caminho: alvo, nome: path.basename(alvo) };
@@ -497,7 +512,21 @@ export async function rotearConfig(
     return true;
   }
 
-  // ----- PUT /api/config/curriculos/arquivo: upload de PDF/DOC (JSON base64) -----
+  // Escrita de config é a única rota que SUBSTITUI secrets e grava PII —
+  // se DASHBOARD_TOKEN estiver definido, PUT exige o header X-Config-Token.
+  // (GET continua aberto, no padrão do resto do dashboard — o container
+  // exposto em 0.0.0.0 continua sendo um risco documentado no compose.)
+  const token = process.env.DASHBOARD_TOKEN;
+  if (token) {
+    const informado = req.headers['x-config-token'];
+    if (informado !== token) {
+      responderJSON(res, 403, { ok: false, mensagem: 'X-Config-Token ausente ou incorreto (defina DASHBOARD_TOKEN no .env)' });
+      return true;
+    }
+  }
+
+  // ----- PUT /api/config/curriculos/arquivo: upload de PDF/DOC (JSON base64).
+  // Depois do check de token — grava PII (currículo) e substitui arquivos.
   if (caminho === '/api/config/curriculos/arquivo') {
     const bruto = await lerCorpoGrande(req, LIMITE_UPLOAD);
     if (bruto === null) {
@@ -518,19 +547,6 @@ export async function rotearConfig(
     }
     responderJSON(res, 200, { ok: true, mensagem: 'Currículo enviado', entrada: resultado.entrada });
     return true;
-  }
-
-  // Escrita de config é a única rota que SUBSTITUI secrets e grava PII —
-  // se DASHBOARD_TOKEN estiver definido, PUT exige o header X-Config-Token.
-  // (GET continua aberto, no padrão do resto do dashboard — o container
-  // exposto em 0.0.0.0 continua sendo um risco documentado no compose.)
-  const token = process.env.DASHBOARD_TOKEN;
-  if (token) {
-    const informado = req.headers['x-config-token'];
-    if (informado !== token) {
-      responderJSON(res, 403, { ok: false, mensagem: 'X-Config-Token ausente ou incorreto (defina DASHBOARD_TOKEN no .env)' });
-      return true;
-    }
   }
 
   const corpo = await lerCorpo(req);

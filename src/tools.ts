@@ -734,6 +734,22 @@ export function criarExecutorDeTools(
         const urlVaga = (args.url_vaga as string) || '';
         const acao = (args.acao as string) || 'envio';
 
+        // Barreira determinística contra candidatura duplicada. Antes, esta
+        // checagem dependia do LLM lembrar de chamar verificar_ja_aplicou e a
+        // proteção do banco só acontecia depois do clique externo.
+        // Mensagens ao recrutador continuam permitidas após uma candidatura.
+        const acaoNormalizada = acao.toLocaleLowerCase('pt-BR');
+        const ehMensagemRecrutador = acaoNormalizada.includes('mensagem')
+          && acaoNormalizada.includes('recrutador');
+        if (!ehMensagemRecrutador && verificarJaAplicou(urlVaga)) {
+          log('AGENTE', `Envio bloqueado: candidatura já registrada — ${urlVaga}`);
+          return JSON.stringify({
+            permitido: false,
+            motivo: 'JA_APLICOU',
+            mensagem: 'JA_APLICOU: esta vaga já possui candidatura registrada. NÃO clique no envio; pule para a próxima vaga.',
+          });
+        }
+
         // CHECKPOINT DE ENVIO (cooperativo): o agente é instruído a chamar esta
         // tool antes do clique de envio. Em dry-run respondemos "bloqueado" e
         // aplicamos o teto, mas o clique em si é uma browser tool do MCP que o

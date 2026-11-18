@@ -27,7 +27,7 @@ import {
 
 type Valores = Record<string, string | number | boolean | null>;
 
-/** Rótulos humanos + código técnico (design: label amigável + <code>VAR</code>). */
+/** Rótulos humanos; as chaves técnicas ficam apenas no código e no payload. */
 const ROTULOS_ENV: Record<string, { label: string; unit?: string; hint?: string }> = {
   LIMITE_DIARIO: { label: "Limite diário de candidaturas" },
   MAX_POR_EXECUCAO: { label: "Máximo por execução" },
@@ -66,7 +66,7 @@ const ROTULOS_ENV: Record<string, { label: string; unit?: string; hint?: string 
   CRON_HORARIO: { label: "Horário da execução" },
 };
 
-/** Descrições dos toggles (design: nome amigável + <code>VAR</code> + legenda). */
+/** Descrições dos toggles; as chaves técnicas ficam apenas no código. */
 const ROTULOS_TOGGLE: Record<string, { label: string; descricao: string }> = {
   DRY_RUN: { label: "Modo simulação", descricao: "Simula as candidaturas sem enviar." },
   PAUSAR_EM_LOGIN: { label: "Pausar ao detectar login", descricao: "O bot para e espera você entrar na conta." },
@@ -260,7 +260,7 @@ export function SettingsScreen({
       <div className="toggle-field" key={c.chave}>
         <span>
           <b>
-            {r.label} <code>{c.chave}</code>
+            {r.label}
           </b>
           <small>{r.descricao}</small>
         </span>
@@ -444,9 +444,8 @@ export function SettingsScreen({
             ))}
           </div>
           <p className="field-hint" style={{ marginTop: 10 }}>
-            Para editar instruções e URLs de busca de cada portal, ajuste{" "}
-            <code>config/sites.json</code> — os campos de texto por URL ficam fora da UI de propósito
-            (URLs do LinkedIn/Gupy têm query strings fáceis de estragar).
+            As instruções e URLs de busca ficam fora da interface para evitar alterações acidentais
+            nas configurações dos portais.
           </p>
         </FormCard>
       </div>

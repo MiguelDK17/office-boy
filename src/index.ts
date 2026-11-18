@@ -14,6 +14,7 @@ import { configurarEmail, enviarRelatorioEmail, gerarHTMLRelatorio } from './ema
 import { iniciarCron, pararCron } from './cron.js';
 import { exibirResumoTokens, obterCustoTotal, obterTokensTotal, obterTotalChamadas, resetarTracker } from './token-tracker.js';
 import { configurarLLMAux } from './llm-adapter.js';
+import { criarSessaoOpenRouter } from './openrouter.js';
 import type { Perfil, SitesConfig, AgenteConfig } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -147,7 +148,9 @@ function handlerRetomada(): void {
 async function executarFluxoPrincipal(config: AgenteConfig): Promise<void> {
   fluxoEmAndamento = true;
   try {
-    await executarFluxoInterno(config);
+    const openRouterSessionId = criarSessaoOpenRouter();
+    log('INFO', `Sessão OpenRouter: ${openRouterSessionId}`);
+    await executarFluxoInterno({ ...config, openRouterSessionId });
   } finally {
     fluxoEmAndamento = false;
   }
@@ -351,6 +354,7 @@ async function main() {
     ollamaUrl: config.ollamaUrl,
     openaiApiKey: config.openaiApiKey,
     openaiBaseUrl: config.openaiBaseUrl,
+    sessionId: config.openRouterSessionId,
   });
 
   // Verifica se é modo cron ou execução única

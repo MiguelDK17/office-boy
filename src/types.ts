@@ -114,6 +114,8 @@ export interface AgenteConfig {
   ollamaUrl: string;
   openaiApiKey: string;
   openaiBaseUrl: string;
+  /** ID compartilhado pelas chamadas OpenRouter de uma execução. */
+  openRouterSessionId?: string;
 }
 
 export interface RespostasPredefinidas {

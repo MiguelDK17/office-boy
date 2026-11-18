@@ -10,6 +10,7 @@ import {
 } from '../src/agente';
 import { customTools, ehToolCustomizada } from '../src/tools';
 import type { AgenteConfig } from '../src/types';
+import { camposOpenRouter, criarSessaoOpenRouter, ehOpenRouter, obterRoteamentoOpenRouter } from '../src/openrouter';
 
 function configFake(over: Partial<AgenteConfig> = {}): AgenteConfig {
   return {
@@ -219,5 +220,39 @@ describe('criarClientAgente — descentralização multi-LLM', () => {
     // Validação
     expect(client.baseURL).toBe('http://localhost:11434/v1');
     expect((client as unknown as { apiKey?: string }).apiKey).toBe('fake');
+  });
+});
+
+describe('roteamento OpenRouter', () => {
+  it('prioriza preço e preserva disponibilidade/failover por padrão', () => {
+    expect(obterRoteamentoOpenRouter()).toEqual({
+      sort: 'price',
+      allow_fallbacks: true,
+      require_parameters: true,
+    });
+    expect(camposOpenRouter('https://openrouter.ai/api/v1')).toEqual({
+      provider: obterRoteamentoOpenRouter(),
+    });
+    expect(camposOpenRouter('https://openrouter.ai/api/v1', 'price', 'officeboy-test-session')).toMatchObject({
+      session_id: 'officeboy-test-session',
+    });
+  });
+
+  it('não injeta política OpenRouter em endpoints compatíveis terceiros', () => {
+    expect(ehOpenRouter('https://api.openai.com/v1')).toBe(false);
+    expect(camposOpenRouter('https://api.openai.com/v1')).toEqual({});
+  });
+
+  it('aceita estratégia futura sem mudar o default', () => {
+    expect(obterRoteamentoOpenRouter('latency').sort).toBe('latency');
+    expect(obterRoteamentoOpenRouter().sort).toBe('price');
+  });
+
+  it('gera um identificador de sessão curto e único', () => {
+    const a = criarSessaoOpenRouter();
+    const b = criarSessaoOpenRouter();
+    expect(a).toMatch(/^officeboy-/);
+    expect(a.length).toBeLessThanOrEqual(256);
+    expect(a).not.toBe(b);
   });
 });

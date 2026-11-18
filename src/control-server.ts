@@ -105,7 +105,9 @@ const estado: EstadoRun = {
   iniciadoEm: null,
   encerradoEm: null,
   codigoSaida: null,
-  dryRun: true,
+  // Produção é o padrão; dry-run precisa ser escolhido explicitamente na UI
+  // ou via DRY_RUN=true.
+  dryRun: false,
   origem: null,
   linhas: [],
   ultimoCusto: null,

@@ -87,6 +87,19 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
     expect(resp).toMatch(/PODE_ENVIAR|liberado/i);
   });
 
+  it('em producao, confirmar_envio BLOQUEIA vaga já cadastrada', async () => {
+    // A candidatura https://x/ok foi registrada no teste anterior.
+    const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false }));
+
+    const resp = await executar('confirmar_envio', {
+      url_vaga: 'https://x/ok',
+      acao: 'enviar candidatura',
+    });
+
+    expect(resp).toMatch(/JA_APLICOU|já possui candidatura/i);
+    expect(resp).not.toMatch(/PODE_ENVIAR/);
+  });
+
   it('bloqueia envio ao atingir o teto por execucao', async () => {
     // Cenário: produção com teto de 2 envios por execução
     const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false, maxPorExecucao: 2 }));

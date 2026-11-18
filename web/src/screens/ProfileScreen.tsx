@@ -107,17 +107,17 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
 
   const processarArquivo = async (file: File) => {
     if (!file) return;
-    if (file.size > 10 * 1024 * 1024) {
-      setErroUpload("Arquivo maior que 10 MB.");
-      return;
-    }
-    if (!/\.(pdf|docx?|txt)$/i.test(file.name)) {
-      setErroUpload("Formato não suportado — use PDF, DOC ou DOCX.");
-      return;
-    }
-    setEnviando(true);
-    setErroUpload(null);
     try {
+      if (file.size > 10 * 1024 * 1024) {
+        setErroUpload("Arquivo maior que 10 MB.");
+        return;
+      }
+      if (!/\.(pdf|docx?|txt)$/i.test(file.name)) {
+        setErroUpload("Formato não suportado — use PDF, DOC ou DOCX.");
+        return;
+      }
+      setEnviando(true);
+      setErroUpload(null);
       const base64 = await new Promise<string>((resolve, reject) => {
         const leitor = new FileReader();
         leitor.onload = () => resolve(String(leitor.result).split(",")[1] ?? "");
@@ -126,7 +126,15 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
       });
       // "Trocar" reusa o id da linha (substitui o arquivo); novo currículo
       // deriva o id do nome — o backend registra em curriculos.json.
-      const id = idTrocar ?? slugCurriculo(file.name);
+      let id = idTrocar ?? slugCurriculo(file.name);
+      // slug derivado pode colidir com um currículo existente (ex.: dois
+      // arquivos com nomes parecidos) — sobrescreveria a entrada sem avisar
+      if (!idTrocar && listaCurriculos.some((c) => String(c.id) === id)) {
+        const substituir = window.confirm(
+          `Já existe um currículo com o id "${id}". Substituir o arquivo dele?`,
+        );
+        if (!substituir) return;
+      }
       const resultado = await enviarCurriculo(id, file.name, base64);
       if (resultado.erro) {
         setErroUpload(resultado.erro);
@@ -604,7 +612,9 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
                   <button
                     type="button"
                     className="view-button"
-                    onClick={() => window.open(urlCurriculo(String(cur.id ?? "")), "_blank")}
+                    onClick={() =>
+                      window.open(urlCurriculo(String(cur.id ?? "")), "_blank", "noopener")
+                    }
                   >
                     <Glyph name="eye" size={15} /> Visualizar
                   </button>

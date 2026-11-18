@@ -1520,6 +1520,7 @@ main.with-expanded-terminal {
   background: var(--surface);
   backdrop-filter: blur(18px);
   box-shadow: var(--shadow);
+  container: settings-card / inline-size;
 }
 
 .form-card.full-card {
@@ -1545,7 +1546,7 @@ main.with-expanded-terminal {
 
 .field-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(120px, 1fr) minmax(200px, 2fr);
   gap: 16px;
 }
 
@@ -1557,7 +1558,8 @@ main.with-expanded-terminal {
   position: relative;
 }
 
-.form-field.field-wide {
+.form-field.field-wide,
+.model-combobox.field-wide {
   grid-column: 1 / -1;
 }
 
@@ -1581,9 +1583,8 @@ main.with-expanded-terminal {
   border-radius: 12px;
   color: var(--text);
   background: var(--surface-soft);
-  font:
-    400 11px "Inter",
-    sans-serif;
+  font: inherit;
+  font-size: max(1rem, 11px);
   transition:
     border-color 180ms ease,
     box-shadow 180ms ease,
@@ -1623,6 +1624,11 @@ main.with-expanded-terminal {
   border-color: #14b8a6;
   box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.1);
   outline: none;
+}
+
+:where(button, input, select, textarea):focus-visible {
+  outline: 3px solid rgba(20, 184, 166, 0.42);
+  outline-offset: 2px;
 }
 
 .form-field input:disabled {
@@ -2070,9 +2076,16 @@ main.with-expanded-terminal {
 }
 
 .secret-control {
+  min-width: 0;
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
+}
+
+.secret-control input,
+.secret-control .masked-value {
+  min-width: 0;
+  overflow: hidden;
 }
 
 .secret-control button {
@@ -2235,7 +2248,9 @@ main.with-expanded-terminal {
 }
 
 .tab-form-screen .field-grid {
-  gap: 22px 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 22px 20px;
 }
 
 .tab-form-screen .form-field,
@@ -2246,6 +2261,8 @@ main.with-expanded-terminal {
 .tab-form-screen .field-label {
   min-height: 20px;
   align-items: flex-start;
+  flex-wrap: wrap;
+  row-gap: 4px;
   font-size: 14px;
   line-height: 1.35;
 }
@@ -2256,6 +2273,16 @@ main.with-expanded-terminal {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 5px 8px;
+}
+
+/* Badges de configuração podem ocupar uma segunda linha. Reserve só esse
+   espaço curto nos campos em colunas para manter os controles alinhados; os
+   campos largos continuam com altura natural. */
+.tab-form-screen .settings-fields > .form-field:not(.field-wide) .field-label {
+  block-size: 42px;
+  min-block-size: 42px;
+  overflow: visible;
+  align-content: flex-start;
 }
 
 .tab-form-screen .field-label code,
@@ -2272,7 +2299,7 @@ main.with-expanded-terminal {
 .tab-form-screen .masked-value {
   height: 48px;
   padding: 0 15px;
-  font-size: 16px;
+  font-size: max(1rem, 16px);
 }
 
 .tab-form-screen .form-field textarea {
@@ -2383,6 +2410,7 @@ main.with-expanded-terminal {
 .configured-badge {
   padding: 4px 8px;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .configured-badge {
@@ -2548,6 +2576,15 @@ main.with-expanded-terminal {
 .tab-form-screen .form-card:has(.custom-select-open) {
   position: relative;
   z-index: 18;
+}
+
+/* Um card pode ficar estreito mesmo quando a viewport ainda é larga
+   (por exemplo, ao lado de outro card). A grade acompanha o espaço real do
+   componente e não deixa rótulos, badges e controles se esmagarem. */
+@container settings-card (inline-size < 560px) {
+  .settings-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .tab-form-screen .restart-banner strong {

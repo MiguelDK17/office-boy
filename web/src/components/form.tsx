@@ -2,7 +2,7 @@
 // design do Figma Make, adaptadas para dados CONTROLADOS (o protótipo usava
 // defaultValue + estado interno; aqui os valores vêm dos configs reais).
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { carregarModelos, type ModeloCatalogo } from "../lib/api";
 
 export type GlyphName = "check" | "eye" | "file" | "lock" | "upload";
@@ -93,14 +93,19 @@ export function FormCard({
   );
 }
 
-/** Rótulo + nome técnico (ex.: "Meta de candidaturas <code>META_CANDIDATURAS</code>"). */
-export function RotuloCampo({ label, technicalName }: { label: string; technicalName?: string }) {
-  return (
-    <span>
-      {label}
-      {technicalName && <code>{technicalName}</code>}
-    </span>
-  );
+/**
+ * Rótulo amigável do campo.
+ * `technicalName` continua aceito para documentar a chave do .env nos usos
+ * internos, mas identificadores técnicos não são exibidos na interface.
+ */
+export function RotuloCampo({
+  label,
+  technicalName: _technicalName,
+}: {
+  label: string;
+  technicalName?: string;
+}) {
+  return <span>{label}</span>;
 }
 
 /**
@@ -170,9 +175,19 @@ export function SelectField({
   onChange: (valor: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  // fecha ao clicar fora
+  const raiz = useRef<HTMLDivElement>(null);
+  // fecha por clique-fora (onBlur no trigger fecharia antes do click da opção:
+  // o mousedown da opção rouba o foco e desmonta o menu)
+  useEffect(() => {
+    if (!open) return;
+    const fora = (e: PointerEvent) => {
+      if (raiz.current && !raiz.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", fora);
+    return () => document.removeEventListener("pointerdown", fora);
+  }, [open]);
   return (
-    <div className={`form-field custom-select ${open ? "custom-select-open" : ""}`}>
+    <div ref={raiz} className={`form-field custom-select ${open ? "custom-select-open" : ""}`}>
       <span className="field-label">
         <RotuloCampo label={label} technicalName={technicalName} />
       </span>
@@ -181,7 +196,6 @@ export function SelectField({
         className="custom-select-trigger"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        onBlur={() => setOpen(false)}
         onKeyDown={(event) => {
           if (event.key === "Escape") setOpen(false);
         }}
@@ -195,6 +209,8 @@ export function SelectField({
             <button
               type="button"
               className={value === option ? "custom-option-selected" : ""}
+              // não roubar o foco do trigger: o click precisa chegar aqui
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
                 onChange(option);
                 setOpen(false);
@@ -436,7 +452,7 @@ export function ModelCombobox({
   value: string;
   onChange: (valor: string) => void;
 }) {
-  const isOpenRouter = apiAddress.toLowerCase().includes("openrouter");
+  const isOpenRouter = (apiAddress || "https://openrouter.ai/api/v1").toLowerCase().includes("openrouter");
   const [open, setOpen] = useState(false);
   const [manual, setManual] = useState(false);
   const [status, setStatus] = useState<StatusModelos>("pronto");
@@ -444,6 +460,26 @@ export function ModelCombobox({
   const [query, setQuery] = useState("");
   const [catalogo, setCatalogo] = useState<ModeloCatalogo[] | null>(null);
   const [erroCatalogo, setErroCatalogo] = useState<string | null>(null);
+  const raiz = useRef<HTMLDivElement>(null);
+
+  // fecha por clique-fora (o trigger não usa onBlur: fecharia antes do click
+  // da opção, igual ao SelectField)
+  useEffect(() => {
+    if (!open) return;
+    const fora = (e: PointerEvent) => {
+      if (raiz.current && !raiz.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", fora);
+    return () => document.removeEventListener("pointerdown", fora);
+  }, [open]);
+
+  // trocou o endereço da API → catálogo antigo é de outro provedor; recarrega
+  useEffect(() => {
+    setCatalogo(null);
+    setStatus("pronto");
+    setErroCatalogo(null);
+    setOpen(false);
+  }, [apiAddress]);
 
   // manual: campo livre (id do modelo) — também é o caminho p/ não-OpenRouter
   if (!isOpenRouter || manual) {
@@ -501,14 +537,13 @@ export function ModelCombobox({
   };
 
   return (
-    <div className={`model-combobox field-wide ${open ? "combobox-open" : ""}`}>
+    <div ref={raiz} className={`model-combobox field-wide ${open ? "combobox-open" : ""}`}>
       <span className="field-label">
         <RotuloCampo label={label} technicalName={technicalName} />
       </span>
       <button type="button" className="model-trigger" onClick={() => void abrirFechar()} aria-expanded={open}>
         <span>
           <strong>{value || "Escolha um modelo"}</strong>
-          <code>{value}</code>
         </span>
         <span className="model-chevron">⌄</span>
       </button>
@@ -565,7 +600,6 @@ export function ModelCombobox({
                   <span className="model-check">{value === modelo.id ? "✓" : ""}</span>
                   <span className="model-option-copy">
                     <strong>{modelo.name}</strong>
-                    <code>{modelo.id}</code>
                   </span>
                   <span className="model-tags">
                     {modelo.free && <small>Grátis</small>}

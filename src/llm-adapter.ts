@@ -19,6 +19,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { log } from './logger.js';
 import { registrarUsoTokens, type UsageMetadata } from './token-tracker.js';
+import { camposOpenRouter } from './openrouter.js';
 
 // ========== INTERFACE ==========
 
@@ -124,6 +125,7 @@ class OpenAICompatProvider implements LLMProvider {
     private model: string,
     private apiKey: string,
     private baseUrl: string,
+    private sessionId?: string,
   ) {}
 
   get modeloPricing(): string {
@@ -143,6 +145,7 @@ class OpenAICompatProvider implements LLMProvider {
         model: this.model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.4,
+        ...camposOpenRouter(this.baseUrl, 'price', this.sessionId),
       }),
     });
 
@@ -187,6 +190,7 @@ export function configurarLLMAux(config: {
   ollamaUrl?: string;
   openaiApiKey?: string;
   openaiBaseUrl?: string;
+  sessionId?: string;
 }): void {
   providerAux = criarProvider(
     config.provider,
@@ -195,6 +199,7 @@ export function configurarLLMAux(config: {
     config.ollamaUrl,
     config.openaiApiKey,
     config.openaiBaseUrl,
+    config.sessionId,
   );
 
   // Fallback: Gemini (provider secundário) quando configurado e o provider
@@ -213,6 +218,7 @@ function criarProvider(
   ollamaUrl?: string,
   openaiApiKey?: string,
   openaiBaseUrl?: string,
+  sessionId?: string,
 ): LLMProvider {
   switch (tipo) {
     case 'gemini':
@@ -227,6 +233,7 @@ function criarProvider(
         model,
         openaiApiKey || '',
         openaiBaseUrl || 'https://api.openai.com/v1',
+        sessionId,
       );
 
     default:

@@ -234,6 +234,7 @@ Detalhes que importam:
 - **Gate de run**: sem navegador respondendo, o run é recusado com motivo — nenhum token gasto com execução fadada.
 - **uid alinhado**: o container roda como `node` (uid 1000) — o mesmo do host — então os bind-mounts (`curriculos/`, `config/`) continuam graváveis.
 - **Custo dinâmico**: quando o provedor reporta o custo real (OpenRouter), o dashboard mostra o valor exato, não uma estimativa.
+- **Sessão OpenRouter por run**: cada execução recebe um `session_id` único, compartilhado pelo agente e pelo provider auxiliar; use o ID exibido no log para agrupar custo, provedor e traces no painel do OpenRouter.
 - **`CONTROL_MODE=false`** volta ao auto-run, para uso com cron.
 
 > ⚠️ **`docker compose run`** (o do Docker puro) **não publica as portas** do serviço e cria um container *paralelo*, sem derrubar o que já está de pé — por isso o atalho `officeboy` usa `up`/`down`.
@@ -262,7 +263,7 @@ Detalhes que importam:
 | `DELAY_MAX` | Delay máximo entre ações (ms) | `5000` |
 | `SCORE_MINIMO` | Score mínimo para aplicar (1-10) | `6` |
 | `CUSTO_MAX_USD` | Teto de custo por execução em USD (0 = desativado) | `0` |
-| `DRY_RUN` | Modo teste — checkpoint bloqueia envio e registro grava como `dry-run` | `true` |
+| `DRY_RUN` | Modo teste — checkpoint bloqueia envio e registro grava como `dry-run` | `false` |
 | `TELEGRAM_BOT_TOKEN` | Token do bot Telegram | *opcional* |
 | `TELEGRAM_CHAT_ID` | Chat ID do Telegram | *opcional* |
 | `SMTP_HOST` | Servidor SMTP | `smtp.gmail.com` |
@@ -302,7 +303,7 @@ Configure múltiplos currículos otimizados para diferentes tipos de vaga. O age
 A UI fica em `http://localhost:1717` (Docker) ou `http://localhost:3000` (local). Ela é o **control server**: o container sobe a interface e o agente **só roda quando você manda** — zero cota gasta até você clicar.
 
 - **▶ Iniciar bot** / **⏹ Parar** — o run acontece em processo filho, dá para interromper no meio
-- **Checkbox dry-run** — simula o fluxo sem enviar nada (marcado por padrão)
+- **Checkbox dry-run** — simula o fluxo sem enviar nada (desmarcado por padrão)
 - **Log ao vivo** — colorizado por nível, com scroll que respeita sua posição de leitura
 - **Navegador conectado?** — mostra o título e a URL da aba que o bot está usando
 - **Custo real** — o valor reportado pelo provedor no último run
@@ -340,8 +341,9 @@ Score final entre 1-10. Só aplica se `score >= SCORE_MINIMO`.
 A filosofia: o **código** garante o que a arquitetura permite garantir (a gravação), e os demais pontos de risco passam por checkpoints explícitos — em vez de deixar tudo na "boa vontade" de um prompt de 200 linhas.
 
 - **Gate de registro (garantia real, determinística)** — `registrar_candidatura` recusa **no código** qualquer vaga abaixo do `SCORE_MINIMO` ou em blacklist, e em `DRY_RUN=true` grava sempre como `dry-run` (nunca `aplicado`), aconteça o que acontecer com o LLM. Essa é a salvaguarda final.
-- **Checkpoint de envio (`confirmar_envio`)** — o agente passa por ele antes de cada clique de envio; em dry-run responde "bloqueado" e aplica o `MAX_POR_EXECUCAO`. É **cooperativo**: o clique em si é uma ação de browser que o agente controla, então o checkpoint reduz risco e conta envios, mas não é uma barreira física. (Reforçá-lo com mais código não ajudaria — a arquitetura LLM+browser não permite uma trava física do clique; por isso o gate de registro é o que de fato protege.)
+- **Checkpoint de envio (`confirmar_envio`)** — bloqueia deterministicamente URLs já cadastradas como candidatura, além de respeitar dry-run e `MAX_POR_EXECUCAO`. O agente ainda precisa chamar o checkpoint antes do clique final.
 - **Teto de custo** — `CUSTO_MAX_USD` interrompe o loop se o gasto passar do limite.
+- **Observabilidade OpenRouter** — cada run envia `session_id`, permitindo acompanhar a execução completa como uma sessão no painel do OpenRouter.
 - **Abandono de portal** — se um portal bloqueia na entrada (Cloudflare), o bot abandona aquele portal e segue para o próximo, em vez de insistir.
 
 > ⚠️ **Risco de conta**: o bot usa seu Chrome **logado** e automatizar portais viola os ToS (especialmente o LinkedIn). Comece em `DRY_RUN=true`, use volumes baixos e, de preferência, uma conta não-principal.
