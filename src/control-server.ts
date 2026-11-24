@@ -26,9 +26,10 @@ import path from 'path';
 import { existsSync, readFileSync, statSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { log } from './logger.js';
-import { inicializarBanco, contarCandidaturasDesde, listarCandidaturas, obterEstatisticas } from './database.js';
+import { inicializarBanco, fecharBanco, contarCandidaturasDesde, listarCandidaturas, obterEstatisticas } from './database.js';
 import { gerarHTML } from './dashboard.js';
-import { rotearConfig } from './config-api.js';
+import { BOOT_ID, registrarAoReiniciar, rotearConfig } from './config-api.js';
+import { migrarIdsSites, rotearSites } from './sites-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -534,6 +535,9 @@ function lerCorpo(req: http.IncomingMessage): Promise<string> {  return new Prom
 /** Sobe o control server (UI + API). */
 export function iniciarControlServer(port: number, host: string): void {
   inicializarBanco();
+  // Migração de ids dos sites: uma vez, antes de aceitar requisições. Sem id
+  // a UI teria de identificar o site pelo nome, que é texto livre.
+  migrarIdsSites();
 
   const srv = http.createServer(async (req, res) => {
     const url = req.url ?? '/';
@@ -681,6 +685,8 @@ export function iniciarControlServer(port: number, host: string): void {
         maxIteracoesPadrao: PADRAO_MAX_ITERACOES,
         // Padrão da meta de qualidade (do .env) — idem, pré-preenche o campo.
         metaCandidaturasPadrao: PADRAO_META_CANDIDATURAS,
+        // Troca a cada subida: a UI usa para confirmar que o restart terminou.
+        bootId: BOOT_ID,
         navegador: await consultarNavegador(),
       });
       return;
@@ -691,8 +697,13 @@ export function iniciarControlServer(port: number, host: string): void {
       return;
     }
 
+    // /api/sites/:id/*: URLs de busca e ativação por site (ver sites-api.ts)
+    if (await rotearSites(req, res, caminho, { rodando: () => estado.rodando })) {
+      return;
+    }
+
     // /api/config*: perfil, respostas, sites, currículos e .env (ver config-api.ts)
-    if (await rotearConfig(req, res, caminho)) {
+    if (await rotearConfig(req, res, caminho, { rodando: () => estado.rodando })) {
       return;
     }
 
@@ -767,6 +778,32 @@ export function iniciarControlServer(port: number, host: string): void {
     }
     log('ERRO', `Control server: falha na porta ${port} — ${err.message}`);
     process.exit(1);
+  });
+
+  // Shutdown usado pelo auto-restart do PUT /api/config/env: fecha SSE, derruba
+  // o filho (se houver), libera a porta e faz checkpoint do banco ANTES do
+  // process.exit — sem truncar o 200 nem deixar conexões penduradas.
+  registrarAoReiniciar(async () => {
+    for (const cliente of clientesSse) {
+      try {
+        cliente.end();
+      } catch {
+        // cliente já foi embora
+      }
+    }
+    clientesSse.clear();
+    if (estado.rodando) {
+      try {
+        processo?.kill('SIGTERM');
+      } catch {
+        // processo já morreu
+      }
+    }
+    await new Promise<void>((resolve) => {
+      srv.close(() => resolve());
+      setTimeout(resolve, 2000).unref(); // keep-alive preso não trava o restart
+    });
+    fecharBanco();
   });
 
   srv.listen(port, host, () => {

@@ -6,6 +6,7 @@ config/perfil.json
 config/curriculos.json
 config/respostas.json
 config/sites.json
+config/sites.json.bak
 assets/
 curriculos/
 screenshots/

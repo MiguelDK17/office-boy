@@ -9,14 +9,16 @@
         "https://portal.gupy.io/job-search/term=Sua%20Area",
         "https://portal.gupy.io/job-search/term=Sua%20Area&workplaceTypes[]=remote",
         "https://portal.gupy.io/job-search/term=Sua%20Area&state=Sua%20Estado"
-      ]
+      ],
+      "id": "04c009ed-7dca-4bf6-9495-f7df0000c90e"
     },
     {
-      "nome": "Vagas.com",
+      "nome": "Catho",
       "tipo": "portal_vagas",
       "ativo": false,
-      "instrucoes": "Na pagina de resultados, clicar em cada vaga para ver detalhes.",
-      "urls_busca": []
+      "instrucoes": "Na pagina de resultados, clicar em cada vaga para ver detalhes. A Catho exige login para visualizar e se candidatar.",
+      "urls_busca": [],
+      "id": "acac95d1-1416-4680-a22b-39f35f6b45c6"
     },
     {
       "nome": "LinkedIn",
@@ -25,14 +27,16 @@
       "instrucoes": "Usar Easy Apply quando disponivel. Pular vagas sem Easy Apply. Preencher formularios com dados do perfil.",
       "urls_busca": [
         "https://www.linkedin.com/jobs/search/?keywords=Sua%20Area&f_WT=2"
-      ]
+      ],
+      "id": "94b3411c-023d-49f1-a4c2-b5e9aef08f34"
     },
     {
       "nome": "Indeed",
       "tipo": "portal_vagas",
       "ativo": false,
       "instrucoes": "Buscar vagas com Candidatura simplificada. Preencher formularios.",
-      "urls_busca": []
+      "urls_busca": [],
+      "id": "25f59185-db59-472a-8146-42a9d81b7d42"
     }
   ]
 }

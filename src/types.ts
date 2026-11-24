@@ -37,6 +37,8 @@ export interface Perfil {
 export type NivelIngles = 'nenhum' | 'basico' | 'intermediario' | 'avancado' | 'fluente';
 
 export interface Site {
+  /** UUID gerado e persistido (sites-api) — identifica o site nas rotas. */
+  id?: string;
   nome: string;
   urls_busca: string[];
   tipo: 'portal_vagas' | 'linkedin' | 'empresa_direta';

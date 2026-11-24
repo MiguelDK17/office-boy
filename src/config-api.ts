@@ -14,9 +14,14 @@
 // JSON é atômica (tmp + rename) para não corromper config com um crash no meio.
 
 import http from 'http';
+import dotenv from 'dotenv';
+import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { garantirIdsSites } from './site-ids.js';
+import { origemLocalPermitida } from './local-origin.js';
+import { validarUrls } from './url-validation.js';
 import { log } from './logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,8 +30,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDados = process.env.OFFICEBOY_DATA_DIR
   ? path.resolve(process.env.OFFICEBOY_DATA_DIR)
   : null;
-const DIR_CONFIG = baseDados ? path.join(baseDados, 'config') : path.resolve(__dirname, '..', 'config');
-const ARQ_ENV = baseDados ? path.join(baseDados, '.env') : path.resolve(__dirname, '..', '.env');
+export const DIR_CONFIG = baseDados ? path.join(baseDados, 'config') : path.resolve(__dirname, '..', 'config');
+export const ARQ_ENV = baseDados ? path.join(baseDados, '.env') : path.resolve(__dirname, '..', '.env');
 
 // ========== CAMPOS DE .env EXPOSTOS NA UI (whitelist) ==========
 
@@ -93,11 +98,100 @@ const CAMPOS_ENV: CampoEnv[] = [
   { chave: 'CRON_HORARIO', tipo: 'texto', grupo: 'cron' },
 ];
 
-const CHAVES_ENV = new Set(CAMPOS_ENV.map(c => c.chave));
+/**
+ * Chaves que a UI pode alterar. As `somenteLeitura` (DASHBOARD_HOST,
+ * CDP_ENDPOINT, CONTROL_MODE, portas...) vêm do `environment:` do Compose e
+ * NÃO devem ser reaplicadas do .env no restart — sobrescreveriam o host de
+ * escuta do modo container e deixariam a UI inacessível.
+ */
+export const CHAVES_ENV_EDITAVEIS = new Set(
+  CAMPOS_ENV.filter(c => !c.somenteLeitura).map(c => c.chave),
+);
+
+// ========== AUTO-RESTART (container recriado pelo restart policy) ==========
+
+/** Identifica ESTE processo. Muda a cada subida — a UI espera a troca. */
+export const BOOT_ID = randomUUID();
+
+let reinicioPendente = false;
+let aoReiniciar: (() => Promise<void>) | null = null;
+
+/** O control server registra aqui o fechamento de SSE/HTTP/banco. */
+export function registrarAoReiniciar(fn: () => Promise<void>): void {
+  aoReiniciar = fn;
+}
+
+export type MotivoSemReinicio = 'rodando' | 'sem-supervisor' | 'sem-control-mode' | null;
+
+/**
+ * Só reinicia sozinho quando o bot está parado e há um supervisor para recriar
+ * o processo (Docker, ou `OFFICEBOY_AUTO_RESTART=true` com systemd/scaleway).
+ */
+export function motivoSemReinicio(
+  rodando: boolean,
+  dentroDoDocker = existsSync('/.dockerenv'),
+): MotivoSemReinicio {
+  if (rodando) return 'rodando';
+  const override = process.env.OFFICEBOY_AUTO_RESTART;
+  const supervisionado = override === undefined ? dentroDoDocker : override === 'true';
+  if (!supervisionado) return 'sem-supervisor';
+  if (process.env.CONTROL_MODE !== 'true') return 'sem-control-mode';
+  return null;
+}
+
+export function deveReiniciarAutomaticamente(
+  rodando: boolean,
+  dentroDoDocker = existsSync('/.dockerenv'),
+): boolean {
+  return motivoSemReinicio(rodando, dentroDoDocker) === null;
+}
+
+/**
+ * Encerra o processo DEPOIS do 200 chegar ao cliente e do shutdown registrado.
+ * O Compose tem `restart: unless-stopped` e o entrypoint termina em
+ * `exec node dist/index.js` — o Docker recria e relê o .env. Sem montar o
+ * socket do Docker dentro do container (isso daria root no host à UI).
+ */
+export function agendarReinicio(res?: http.ServerResponse): void {
+  if (reinicioPendente) return;
+  reinicioPendente = true;
+  log('INFO', 'Config: reinício automático solicitado — o container será recriado');
+
+  const sair = async (): Promise<void> => {
+    try {
+      await aoReiniciar?.();
+    } catch (err) {
+      log('WARN', `Config: falha no shutdown antes do reinício — ${err instanceof Error ? err.message : String(err)}`);
+    }
+    process.exit(0);
+  };
+  const depoisDoFlush = () => setTimeout(() => void sair(), 1200);
+
+  if (!res || res.writableFinished) {
+    depoisDoFlush();
+    return;
+  }
+  // Não interrompe a resposta (nem outras requisições em voo) no meio.
+  res.once('finish', depoisDoFlush);
+}
+
+/**
+ * Extrai do .env somente as chaves editáveis, para serem reaplicadas no
+ * startup. `dotenv/config` não sobrescreve variáveis já definidas; as do
+ * Compose continuam valendo para o resto.
+ */
+export function chavesEnvParaReaplicar(conteudo: string): Record<string, string> {
+  const parsed = dotenv.parse(conteudo);
+  const resultado: Record<string, string> = {};
+  for (const [chave, valor] of Object.entries(parsed)) {
+    if (CHAVES_ENV_EDITAVEIS.has(chave)) resultado[chave] = valor;
+  }
+  return resultado;
+}
 
 // ========== HELPERS ==========
 
-function lerJSON<T>(caminho: string, fallback: T): T {
+export function lerJSON<T>(caminho: string, fallback: T): T {
   try {
     return JSON.parse(readFileSync(caminho, 'utf-8')) as T;
   } catch {
@@ -106,7 +200,7 @@ function lerJSON<T>(caminho: string, fallback: T): T {
 }
 
 /** Escrita atômica: escreve em .tmp e rename — crash no meio não corrompe. */
-function gravarJSONAtomico(caminho: string, valor: unknown): void {
+export function gravarJSONAtomico(caminho: string, valor: unknown): void {
   const tmp = `${caminho}.tmp`;
   writeFileSync(tmp, JSON.stringify(valor, null, 2), 'utf-8');
   renameSync(tmp, caminho);
@@ -143,10 +237,11 @@ function valorEnv(campo: CampoEnv): { valor: string | number | boolean | null; d
 
 const TIPOS_SITE = new Set(['portal_vagas', 'linkedin', 'empresa_direta']);
 
-function validarSites(corpo: unknown): { ok: boolean; sites?: { nome: string; tipo: string; instrucoes: string; urls_busca: string[]; ativo: boolean }[]; motivo?: string } {
+function validarSites(corpo: unknown): { ok: boolean; sites?: { id: string; nome: string; tipo: string; instrucoes: string; urls_busca: string[]; ativo: boolean }[]; motivo?: string } {
   const sites = (corpo as { sites?: unknown })?.sites;
   if (!Array.isArray(sites)) return { ok: false, motivo: 'Body precisa de { sites: [...] }' };
   const validos: {
+    id?: string;
     nome: string;
     tipo: string;
     instrucoes: string;
@@ -158,15 +253,25 @@ function validarSites(corpo: unknown): { ok: boolean; sites?: { nome: string; ti
     const tipo = String((s as { tipo?: unknown })?.tipo ?? '').trim();
     if (!nome) return { ok: false, motivo: 'Todo site precisa de nome' };
     if (!TIPOS_SITE.has(tipo)) return { ok: false, motivo: `Tipo invalido para ${nome}: ${tipo}` };
+    // Mesmas regras das rotas por id: a rota legada não pode ser um buraco
+    // que aceite http://, duplicatas ou listas acima do limite.
+    const validacaoUrls = validarUrls((s as { urls_busca?: unknown })?.urls_busca);
+    if (!validacaoUrls.ok) {
+      return { ok: false, motivo: `${nome}: ${validacaoUrls.mensagem}` };
+    }
+    const id = String((s as { id?: unknown })?.id ?? '').trim();
     validos.push({
+      ...(id ? { id } : {}),
       nome,
       tipo,
       instrucoes: String((s as { instrucoes?: unknown })?.instrucoes ?? ''),
-      urls_busca: listaDe((s as { urls_busca?: unknown })?.urls_busca),
+      urls_busca: validacaoUrls.urls,
       ativo: Boolean((s as { ativo?: unknown })?.ativo),
     });
   }
-  return { ok: true, sites: validos };
+  // A UI manda o id de volta; se algum site novo chegar sem id, gera agora.
+  const { sites: comIds } = garantirIdsSites(validos);
+  return { ok: true, sites: comIds as { id: string; nome: string; tipo: string; instrucoes: string; urls_busca: string[]; ativo: boolean }[] };
 }
 
 function validarCurriculos(corpo: unknown): {
@@ -416,7 +521,7 @@ function arquivoCurriculo(idBruto: string): { ok: boolean; caminho?: string; nom
 
 // ========== ROTEADOR ==========
 
-function responderJSON(res: http.ServerResponse, codigo: number, corpo: unknown): void {
+export function responderJSON(res: http.ServerResponse, codigo: number, corpo: unknown): void {
   const dados = JSON.stringify(corpo);
   res.writeHead(codigo, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -425,15 +530,15 @@ function responderJSON(res: http.ServerResponse, codigo: number, corpo: unknown)
   res.end(dados);
 }
 
-function lerCorpo(req: http.IncomingMessage): Promise<string | null> {
+export function lerCorpo(req: http.IncomingMessage, limite = 100_000): Promise<string | null> {
   return new Promise((resolve) => {
     let dados = '';
     let estourou = false;
     req.on('data', (c) => {
       if (estourou) return; // descarta o excedente, mas mantém o socket vivo
       dados += c;
-      // configs reais cabem em ~6 KB; 100 KB é folga
-      if (dados.length > 100_000) {
+      // Rotas de URL precisam de mais espaço (50 × 2048 chars ≈ 102 KB).
+      if (dados.length > limite) {
         estourou = true;
         dados = '';
       }
@@ -448,6 +553,7 @@ export async function rotearConfig(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   caminho: string,
+  opts: { rodando: () => boolean } = { rodando: () => false },
 ): Promise<boolean> {
   // Estrito: /api/config exato ou /api/config/<rota> — /api/configfoo é 404.
   if (caminho !== '/api/config' && !caminho.startsWith('/api/config/')) return false;
@@ -458,11 +564,14 @@ export async function rotearConfig(
     const perfil = lerJSON<Record<string, unknown>>(path.join(DIR_CONFIG, 'perfil.json'), {});
     const respostas = lerJSON<Record<string, unknown>>(path.join(DIR_CONFIG, 'respostas.json'), {});
     const sites = lerJSON<{ sites: unknown[] }>(path.join(DIR_CONFIG, 'sites.json'), { sites: [] });
+    // Garante ids na resposta mesmo se a migração de startup não rodou/falhou:
+    // a UI nunca deve identificar um site pelo nome.
+    const sitesComId = garantirIdsSites((Array.isArray(sites.sites) ? sites.sites : []) as { id?: string }[]);
     const curriculos = lerJSON<Record<string, unknown>>(path.join(DIR_CONFIG, 'curriculos.json'), {});
     responderJSON(res, 200, {
       perfil,
       respostas,
-      sites,
+      sites: { ...sites, sites: sitesComId.sites },
       curriculos,
       env: CAMPOS_ENV.map(campo => ({
         chave: campo.chave,
@@ -478,6 +587,14 @@ export async function rotearConfig(
   }
 
   if (metodo !== 'PUT') {
+    // ----- GET /api/config/session: entrega o token ao front da própria UI -----
+    // Só devolve quando Host/Origin é local. No modo container exposto (Host
+    // remoto), a própria guarda de escrita já bloqueia as gravações — coerente.
+    if (caminho === '/api/config/session' && metodo === 'GET') {
+      const token = origemLocalPermitida(req) ? process.env.DASHBOARD_TOKEN ?? null : null;
+      responderJSON(res, 200, { token });
+      return true;
+    }
     // ----- GET /api/config/modelos: catálogo OpenRouter p/ ModelCombobox -----
     if (caminho === '/api/config/modelos' && metodo === 'GET') {
       const baseUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
@@ -509,6 +626,13 @@ export async function rotearConfig(
       return true;
     }
     responderJSON(res, 405, { ok: false, mensagem: 'Metodo nao suportado' });
+    return true;
+  }
+
+  // Toda escrita de config passa pela mesma guarda local das rotas de site —
+  // inclusive o PUT legado, que reescreve a lista inteira de sites.
+  if (!origemLocalPermitida(req)) {
+    responderJSON(res, 403, { ok: false, mensagem: 'Gravação de config só é aceita de localhost (Host/Origin locais)' });
     return true;
   }
 
@@ -666,7 +790,9 @@ export async function rotearConfig(
     }
     const limpos: Record<string, string> = {};
     for (const [chave, valor] of Object.entries(valores)) {
-      if (!CHAVES_ENV.has(chave)) {
+      // Somente chaves editáveis: as de infraestrutura vêm do Compose e
+      // alterá-las aqui não teria efeito (ou quebraria o acesso à UI).
+      if (!CHAVES_ENV_EDITAVEIS.has(chave)) {
         responderJSON(res, 400, { ok: false, mensagem: `Chave fora da whitelist: ${chave}` });
         return true;
       }
@@ -677,8 +803,24 @@ export async function rotearConfig(
       responderJSON(res, 409, { ok: false, mensagem: resultado.motivo ?? 'Falha ao atualizar .env' });
       return true;
     }
-    // .env só é lido na inicialização — a UI mostra o banner de reinicialização.
-    responderJSON(res, 200, { ok: true, mensagem: 'Configurações salvas. Reinicie o bot para aplicar.', reiniciar: true });
+    // Com o bot parado, o container se recreia sozinho. Com run ativa (ou fora
+    // do Docker), mantém o aviso manual para não interromper uma candidatura.
+    const motivo = motivoSemReinicio(opts.rodando());
+    const mensagens: Record<Exclude<MotivoSemReinicio, null>, string> = {
+      rodando: 'Configurações salvas. Reinício adiado para não interromper a run.',
+      'sem-supervisor': 'Configurações salvas. Sem supervisor: use OFFICEBOY_AUTO_RESTART=true para reiniciar sozinho.',
+      'sem-control-mode': 'Configurações salvas. Reinicie o processo para aplicar.',
+    };
+    responderJSON(res, 200, {
+      ok: true,
+      mensagem: motivo ? mensagens[motivo] : 'Configurações salvas. Reiniciando automaticamente…',
+      reiniciando: motivo === null,
+      motivo,
+      // A UI compara com o bootId de /api/status para saber que o processo
+      // novo subiu (e não um 200 do processo antigo em outra aba/porta).
+      bootId: BOOT_ID,
+    });
+    if (motivo === null) agendarReinicio(res);
     return true;
   }
 
