@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { readFileSync } from 'fs';
+import { ARQ_ENV, chavesEnvParaReaplicar } from './config-api.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { conectarPlaywrightMCP, desconectarMCP, limparAbasCDP, verificarChromeCDP } from './mcp-client.js';
@@ -317,6 +318,22 @@ async function main() {
   log('INFO', '='.repeat(60));
   log('INFO', '  OFFICE BOY - Agente Inteligente de Candidaturas');
   log('INFO', '='.repeat(60));
+
+  // O `dotenv/config` não sobrescreve variáveis já definidas — e o Compose
+  // injeta as de infraestrutura (DASHBOARD_HOST, CDP_ENDPOINT...) no container.
+  // Num restart automático, reaplicamos do .env montado SOMENTE as chaves que
+  // a UI pode editar, para o novo modelo/API key valerem sem mexer no host.
+  try {
+    const novas = chavesEnvParaReaplicar(readFileSync(ARQ_ENV, 'utf-8'));
+    let total = 0;
+    for (const [chave, valor] of Object.entries(novas)) {
+      process.env[chave] = valor;
+      total++;
+    }
+    if (total > 0) log('INFO', `Config: ${total} variável(is) reaplicada(s) do .env montado`);
+  } catch {
+    // Sem .env acessível, segue com o ambiente injetado (modo dev/container).
+  }
 
   // Valida ambiente
   const config = validarEnv();

@@ -2,7 +2,7 @@
 
 **Agente inteligente que automatiza candidaturas a vagas de emprego usando IA (OpenRouter) + Browser Automation (Playwright MCP).**
 
-O bot navega por portais de vagas (Gupy, Vagas.com, LinkedIn, Indeed), analisa cada vaga, preenche formulários automaticamente com respostas variadas e naturais, e gerencia todo o processo de candidatura — tudo usando seu navegador Chrome já logado.
+O bot navega por portais de vagas (Gupy, Catho, LinkedIn, Indeed), analisa cada vaga, preenche formulários automaticamente com respostas variadas e naturais, e gerencia todo o processo de candidatura — tudo usando seu navegador Chrome já logado.
 
 ---
 
@@ -29,7 +29,7 @@ O bot navega por portais de vagas (Gupy, Vagas.com, LinkedIn, Indeed), analisa c
 | **Smart Scoring** | Pontua vagas de 1-10 antes de aplicar — só aplica em vagas compatíveis |
 | **Dry-Run Mode** | Testa todo o fluxo sem enviar candidaturas de verdade |
 | **Location Filter** | Filtra por localização e modelo de trabalho (remoto/híbrido/presencial) |
-| **Anti-Duplicate** | Banco de dados SQLite rastreia vagas já vistas e candidaturas feitas |
+| **Anti-Duplicate** | SQLite rastreia vagas vistas/candidaturas por ID do portal (não por URL com tracking) e barra reanálise de vagas reprovadas |
 | **Auto Pagination** | Navega automaticamente pelas páginas de resultados |
 | **Screenshots** | Captura screenshot como prova de cada candidatura |
 | **Web Dashboard** | Dashboard em tempo real para acompanhar candidaturas |
@@ -227,6 +227,7 @@ Trocar o nome do projeto é só rodar de novo: `./bin/officeboy alias install no
 | `docker/entrypoint.sh` | Escolhe o navegador (externo → local), sobe Xvfb/Chrome quando preciso, **watchdog** mantém o Chrome vivo, e executa o bot/UI |
 | `docker-compose.yml` | Um arquivo só, com os dois serviços: `bot` (host, padrão) e `bot-container` (Chrome no container, via `profiles`). Portas vindas do `.env` |
 | `src/control-server.ts` | UI de comando: `POST /api/start`, `POST /api/stop`, `GET /api/status`, `GET /api/logs` |
+| `src/sites-api.ts` | URLs de busca e ativação por site: `GET/PUT /api/sites/:id/urls`, `PATCH /api/sites/:id/ativo` |
 
 Detalhes que importam:
 - **Navegador persistente**: o Chrome fica de pé entre runs (perfil em volume) — o login nunca se perde e nenhum run paga o custo de subir navegador.
@@ -254,6 +255,7 @@ Detalhes que importam:
 | `BOT_UI_PORT` | Porta da UI/control server no host (Docker) | `1717` |
 | `BOT_CDP_PORT` | Porta CDP do Chrome do host (usada pelo modo host) | `9222` |
 | `CONTROL_MODE` | `true` = container sobe só a UI (o agente roda sob demanda) | `true` |
+| `OFFICEBOY_AUTO_RESTART` | Força o reinício automático ao salvar `.env` fora do Docker (com supervisor). No Docker é detectado sozinho | *detectado* |
 | `DASHBOARD_PORT` | Porta do dashboard web | `3000` |
 | `DASHBOARD_HOST` | Bind do dashboard (`0.0.0.0` no Docker p/ port-mapping) | `127.0.0.1` |
 | `LIMITE_DIARIO` | Max candidaturas por dia | `10` |
@@ -280,6 +282,15 @@ Detalhes que importam:
 | `GEMINI_API_KEY` | Chave do Google Gemini (só p/ provider auxiliar/fallback) | *opcional* |
 | `GEMINI_MODEL` | Modelo Gemini do provider auxiliar | `gemini-2.5-flash` |
 
+### Trocar modelo (reinício automático)
+
+Alterar `AGENT_LLM_MODEL`, chaves de API ou qualquer outra variável editável na aba **Configurações** salva o `.env` e, **com o bot parado**, reinicia o container sozinho: o servidor responde ao save, encerra o processo e o `restart: unless-stopped` do Compose recria o container com os novos valores. A tela mostra "Reiniciando automaticamente…" e volta sozinha em segundos.
+
+- **Com uma run em andamento**, o reinício é adiado para não interromper candidaturas: aparece o banner "Reinicialização pendente" e você reinicia quando terminar.
+- Fora do Docker, vale o aviso manual. Se você roda com systemd (ou outro supervisor), defina `OFFICEBOY_AUTO_RESTART=true` para habilitar o reinício automático.
+- Na subida, **somente as chaves editáveis** são reaplicadas do `.env` montado. Variáveis de infraestrutura (`DASHBOARD_HOST`, `CDP_ENDPOINT`, `CONTROL_MODE`, portas) continuam vindas do `environment:` do Compose — por isso não aparecem como editáveis na UI.
+- O reinício **não** monta o socket do Docker dentro do container: nenhuma permissão nova é concedida.
+
 ### `config/perfil.json` — Perfil do Candidato
 
 Seus dados pessoais e profissionais que o agente usa para preencher formulários. Veja `perfil.example.json` para a estrutura completa.
@@ -287,6 +298,8 @@ Seus dados pessoais e profissionais que o agente usa para preencher formulários
 ### `config/sites.json` — Sites de Vagas
 
 Configure quais sites o bot deve navegar e quais URLs de busca usar. Cada site pode ter múltiplas URLs de busca.
+
+Cada site ganha um `id` (UUID) gerado automaticamente na primeira subida do control server e persistido no arquivo — **não edite esse campo à mão**. As URLs de busca e o liga/desliga são gerenciados na UI, pelo card "Sites de vagas" e pelo dialog "Gerenciar URLs". O bot lê este arquivo no início de **cada run**: alterações feitas durante uma execução só valem na próxima.
 
 ### `config/respostas.json` — Respostas Pré-definidas
 
@@ -311,6 +324,27 @@ A UI fica em `http://localhost:1717` (Docker) ou `http://localhost:3000` (local)
 - Estatísticas: candidaturas de hoje/total, por plataforma, score médio e funil de resultados
 
 API para automação: `POST /api/start` (`{ dryRun }`), `POST /api/stop`, `GET /api/status`, `GET /api/logs`.
+
+### URLs de busca por site (gravação)
+
+- `GET /api/sites/:id/urls` — lê a lista completa.
+- `PUT /api/sites/:id/urls` — body `{ "urls": ["https://..."] }` (lista completa).
+- `PATCH /api/sites/:id/ativo` — body `{ "ativo": true | false }`.
+
+`id` é o UUID do site. **Regras de validação** (servidor e UI aplicam as mesmas):
+somente `https://` (qualquer outro esquema é rejeitado), no máximo **2048 caracteres**
+por URL e **50 URLs** por site; `trim` automático; sem espaços/caracteres de controle
+internos; duplicatas rejeitadas por comparação normalizada (caixa do host, porta
+padrão e barras finais do caminho). A resposta de erro traz `erros: [{ indice, motivo }]`
+— um por URL inválida. A URL completa nunca vai para o log (pode conter token na query).
+
+A escrita é **atômica** (`tmp` + `rename`), altera **somente** o campo do site alvo e
+cria `config/sites.json.bak` antes da primeira alteração da sessão. **Toda** escrita
+de config (inclusive o `PUT /api/config/sites` legado) só aceita `Host`/`Origin`
+locais, aplica as mesmas regras de URL e mantém o `X-Config-Token` quando
+`DASHBOARD_TOKEN` está definido. A UI obtém esse token em `GET /api/config/session`
+— que só o devolve a clientes locais. Se o bot estiver rodando, a resposta traz
+`aplicadoNaProximaRun: true` (o arquivo é lido no início de cada run).
 
 ---
 
@@ -340,8 +374,9 @@ Score final entre 1-10. Só aplica se `score >= SCORE_MINIMO`.
 
 A filosofia: o **código** garante o que a arquitetura permite garantir (a gravação), e os demais pontos de risco passam por checkpoints explícitos — em vez de deixar tudo na "boa vontade" de um prompt de 200 linhas.
 
-- **Gate de registro (garantia real, determinística)** — `registrar_candidatura` recusa **no código** qualquer vaga abaixo do `SCORE_MINIMO` ou em blacklist, e em `DRY_RUN=true` grava sempre como `dry-run` (nunca `aplicado`), aconteça o que acontecer com o LLM. Essa é a salvaguarda final.
-- **Checkpoint de envio (`confirmar_envio`)** — bloqueia deterministicamente URLs já cadastradas como candidatura, além de respeitar dry-run e `MAX_POR_EXECUCAO`. O agente ainda precisa chamar o checkpoint antes do clique final.
+- **Gate de registro (garantia real, determinística)** — recusa **no código** qualquer vaga abaixo do `SCORE_MINIMO` ou em blacklist, e em `DRY_RUN=true` grava sempre como `dry-run` (nunca `aplicado`), aconteça o que acontecer com o LLM.
+- **Deduplicação por ID da vaga** — a chave canônica (`linkedin:<id>`, `gupy:<jobId>`, `indeed:<jk>`) ignora `refId`/`trackingId` e a URL da etapa do formulário, então a mesma vaga não entra duas vezes só porque a URL mudou. Vagas marcadas com motivo `PERMANENTE:`/`ESGOTADO:` não são reanalisadas.
+- **Checkpoint de envio (`confirmar_envio`)** — bloqueia candidaturas repetidas e vagas já reprovadas, respeita dry-run e `MAX_POR_EXECUCAO`, e **registra a candidatura no ato do clique** (a URL é conferida via CDP). Mesmo que o LLM esqueça de chamar `registrar_candidatura` depois, a candidatura não se perde.
 - **Teto de custo** — `CUSTO_MAX_USD` interrompe o loop se o gasto passar do limite.
 - **Observabilidade OpenRouter** — cada run envia `session_id`, permitindo acompanhar a execução completa como uma sessão no painel do OpenRouter.
 - **Abandono de portal** — se um portal bloqueia na entrada (Cloudflare), o bot abandona aquele portal e segue para o próximo, em vez de insistir.
@@ -588,7 +623,7 @@ officeboy/
 
 ## 🛣️ Roadmap
 
-- [ ] Suporte a mais plataformas (Catho, Trampos, etc.)
+- [ ] Suporte a mais plataformas (Trampos, etc.)
 - [x] ~~CAPTCHA handling via Telegram (humano resolve, bot continua)~~
 - [x] ~~Blacklist de empresas/títulos~~
 - [x] ~~Loop de feedback de resultados (entrevista/oferta/rejeição) + métricas de funil~~

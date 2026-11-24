@@ -41,7 +41,7 @@ describe('api/config — contrato', () => {
 
   it('o control server roteia /api/config antes das rotas de run', () => {
     expect(control).toContain('rotearConfig');
-    const rotaConfig = control.indexOf('rotearConfig(req, res, caminho)');
+    const rotaConfig = control.indexOf('rotearConfig(req, res, caminho,');
     const rotaStart = control.indexOf("'/api/start' && req.method === 'POST'");
     expect(rotaConfig).toBeGreaterThan(-1);
     expect(rotaConfig).toBeLessThan(rotaStart);
