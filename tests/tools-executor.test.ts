@@ -136,6 +136,33 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
   });
 });
 
+describe('formulário em iframe cross-origin', () => {
+  it('iframe de MESMA origem / refs expirados continua RETRIÁVEL', async () => {
+    const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false }));
+    const resp = await executar('reportar_falha', {
+      empresa: 'Squadra Digital', plataforma: 'Portal Próprio',
+      codigo_falha: 'elemento_nao_encontrado',
+      descricao: 'Campo dentro de iframe de mesma origem; refs expiraram, tente de novo depois de novo snapshot.',
+      url_vaga: 'https://www.squadra.com.br/vagas/outra',
+    });
+    expect(resp).toMatch(/RETENTAR/);
+    expect(resp).not.toMatch(/iframe_cross_origin/);
+  }, 12000);
+
+  it('reportar_falha classifica como PERMANENTE e não gasta 3 tentativas', async () => {
+    const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false }));
+    const resp = await executar('reportar_falha', {
+      empresa: 'Squadra Digital', plataforma: 'Portal Próprio',
+      codigo_falha: 'elemento_nao_encontrado',
+      descricao: 'SecurityError: Blocked a frame with origin https://www.squadra.com.br. O formulário está em iframe cross-origin.',
+      url_vaga: 'https://www.squadra.com.br/vagas/dev-mobile-android',
+    });
+    expect(resp).toMatch(/iframe_cross_origin/);
+    expect(resp).toMatch(/NUNCA tente de novo/);
+    expect(resp).not.toMatch(/RETENTAR/);
+  });
+});
+
 describe('dominioDe — domínio registrável', () => {
   it('agrupa subdomínios pelo domínio raiz', () => {
     // Cenário + Ação + Validação

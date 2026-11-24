@@ -232,9 +232,12 @@ async function executarFluxoInterno(config: AgenteConfig): Promise<void> {
   // Executa o agente
   const erros: string[] = [];
   let resultado = '';
+  // Só login_exigido bloqueia o site: 'erro' no health check (timeout/ERR_)
+  // é transitório e não deve eliminar o portal da rodada inteira.
+  const sitesBloqueados = sessoes.filter(s => s.status === 'login_exigido').map(s => s.site);
 
   try {
-    resultado = await executarAgente(mcpClient, perfil, sites, config);
+    resultado = await executarAgente(mcpClient, perfil, sites, config, sitesBloqueados);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     erros.push(msg);
@@ -259,7 +262,11 @@ async function executarFluxoInterno(config: AgenteConfig): Promise<void> {
   log('INFO', `  Modo: ${config.dryRun ? 'DRY-RUN (simulacao)' : 'PRODUCAO'}`);
   log('INFO', `  Novas candidaturas: ${novasCandidaturas}`);
   log('INFO', `  Total hoje: ${candidaturasDepois}/${config.limiteDiario}`);
-  log('INFO', `  Sites processados: ${sitesAtivos.map(s => s.nome).join(', ')}`);
+  const sitesProcessados = sitesAtivos.filter(s => !sitesBloqueados.includes(s.nome));
+  log('INFO', `  Sites processados: ${sitesProcessados.map(s => s.nome).join(', ')}`);
+  if (sitesBloqueados.length > 0) {
+    log('INFO', `  Sites ignorados (sessão inválida): ${sitesBloqueados.join(', ')}`);
+  }
   log('INFO', `  Erros: ${erros.length > 0 ? erros.join('; ') : 'Nenhum'}`);
   log('INFO', `  Custo tokens:      $${obterCustoTotal().toFixed(4)} USD (${obterTokensTotal().toLocaleString('pt-BR')} tokens, ${obterTotalChamadas()} chamadas)`);
   log('INFO', `  Dashboard: http://localhost:${config.dashboardPort}`);

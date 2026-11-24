@@ -654,6 +654,7 @@ export function criarExecutorDeTools(
   perfil: Perfil,
   config: AgenteConfig,
   sinais?: SinaisDoExecutor,
+  dominiosBloqueados: string[] = [],
 ) {
   // Config injetada (não mais globais mutáveis): permite dry-run autoritativo e
   // scoring configurável, e torna o executor previsível para testes.
@@ -752,7 +753,22 @@ export function criarExecutorDeTools(
     return { registrado: true };
   }
 
+  const bloqueados = new Set(dominiosBloqueados.map(d => d.toLowerCase()));
+
   return async function executarTool(name: string, args: Record<string, unknown>): Promise<string> {
+    // Barreira determinística: o prompt já omite os sites sem sessão, mas o
+    // modelo ainda poderia navegar até eles por conta própria.
+    if (name === 'browser_navigate' && bloqueados.size > 0) {
+      const destino = String(args.url ?? '');
+      try {
+        const host = new URL(destino).hostname.toLowerCase();
+        if ([...bloqueados].some(d => host === d || host.endsWith(`.${d}`))) {
+          return `NAO_NAVEGUE: o site ${host} está com sessão inválida e foi removido desta run. Va direto para o PROXIMO SITE da lista.`;
+        }
+      } catch {
+        // argumento não é URL — deixa a tool do MCP decidir
+      }
+    }
     switch (name) {
       case 'obter_perfil_candidato': {
         return JSON.stringify(perfil, null, 2);
@@ -812,7 +828,7 @@ export function criarExecutorDeTools(
             });
           }
           if (verificarJaAplicou(informada) || (real ? verificarJaAplicou(real) : false)) {
-            log('AGENTE', `Envio bloqueado: candidatura já registrada — ${chaveVaga(urlVaga)}`);
+            log('AGENTE', `Envio bloqueado: candidatura já registrada — [URL]`);
             return JSON.stringify({
               permitido: false,
               motivo: 'JA_APLICOU',
@@ -824,7 +840,7 @@ export function criarExecutorDeTools(
         // Dry-run: bloqueia o clique, mas registra como dry-run no ato — o
         // sistema não depende mais de o LLM chamar registrar_candidatura depois.
         if (config.dryRun) {
-          log('AGENTE', `DRY-RUN: envio bloqueado pelo sistema (${acao}) — ${chaveVaga(urlVaga)}`);
+          log('AGENTE', `DRY-RUN: envio bloqueado pelo sistema (${acao}) — [URL]`);
           const r = ehMensagemRecrutador ? null : registrarComGates({
             plataforma: (args.plataforma as string) || '',
             titulo_vaga: (args.titulo_vaga as string) || '',
@@ -843,7 +859,7 @@ export function criarExecutorDeTools(
 
         // Teto por execução: trava determinística contra rajada de envios reais.
         if (enviosConfirmados >= config.maxPorExecucao) {
-          log('AGENTE', `Teto por execucao atingido (${config.maxPorExecucao}). Envio bloqueado — ${chaveVaga(urlVaga)}`);
+          log('AGENTE', `Teto por execucao atingido (${config.maxPorExecucao}). Envio bloqueado — [URL]`);
           return JSON.stringify({
             permitido: false,
             modo: 'producao',
@@ -873,7 +889,7 @@ export function criarExecutorDeTools(
           });
         }
         enviosConfirmados += 1;
-        log('AGENTE', `Envio liberado (${acao}) ${enviosConfirmados}/${config.maxPorExecucao} — ${chaveVaga(urlVaga)}`);
+        log('AGENTE', `Envio liberado (${acao}) ${enviosConfirmados}/${config.maxPorExecucao} — [URL]`);
         return JSON.stringify({
           permitido: true,
           modo: 'producao',
@@ -1143,12 +1159,12 @@ export function criarExecutorDeTools(
         // Bloqueio explícito na ENTRADA do portal: abandona o portal inteiro.
         if (codigoFalha === 'portal_bloqueado') {
           if (dominio) portaisBloqueados.add(dominio);
-          log('FALHA', `PORTAL BLOQUEADO: ${dominio || chaveVaga(urlVaga)} — abandonando o portal nesta execucao`);
+          log('FALHA', `PORTAL BLOQUEADO: ${dominio || '[URL]'} — abandonando o portal nesta execucao`);
           if (!config.dryRun) await new Promise(r => setTimeout(r, 30_000)); // pausa pós-bloqueio
           return JSON.stringify({
             tipo: 'PORTAL_BLOQUEADO',
             acao: 'PULAR_PORTAL',
-            mensagem: `Bloqueio na entrada do portal ${dominio || chaveVaga(urlVaga)}. NAO tente outras URLs nem pagine aqui. Va para o PROXIMO SITE da lista.`,
+            mensagem: `Bloqueio na entrada do portal ${dominio || '[URL]'}. NAO tente outras URLs nem pagine aqui. Va para o PROXIMO SITE da lista.`,
           });
         }
 
@@ -1156,6 +1172,32 @@ export function criarExecutorDeTools(
         // protege a conta sem abandonar o portal inteiro (evita falso positivo).
         if (!config.dryRun && (codigoFalha === 'cloudflare' || codigoFalha === 'site_bloqueado')) {
           await new Promise(r => setTimeout(r, 30_000));
+        }
+
+        // Formulário em iframe cross-origin (ex.: Squadra → Gupy): o navegador
+        // bloqueia o acesso ao documento (SecurityError) e os refs expiram.
+        // Não é retriável — 3 tentativas aqui só queimam iterações e a vaga
+        // volta a aparecer na próxima run se não for marcada.
+        // Exige evidência de ORIGEM CRUZADA. "iframe" sozinho também descreve
+        // timeout/refs expirados (retriáveis); "mesma origem" é o oposto.
+        const sinalIframe = /cross[- ]?origin|security\s?error|blocked a frame|same[- ]?origin policy|failed to execute 'contentdocument' on 'htmliframeelement'|nao foi possivel acessar.*iframe.*origem/i;
+        if (sinalIframe.test(`${codigoFalha} ${descricaoFalha}`)) {
+          registrarVagaVista({
+            url: urlVaga,
+            titulo_vaga: (args.titulo_vaga as string) || undefined,
+            empresa: (args.empresa as string) || undefined,
+            plataforma: (args.plataforma as string) || undefined,
+            motivo_pulo: 'PERMANENTE:iframe_cross_origin — formulário em iframe de origem cruzada (acesso bloqueado pelo navegador)',
+          });
+          tentativasPorUrl.delete(urlVaga);
+          removerPendente(urlVaga);
+          log('FALHA', 'PERMANENTE [iframe_cross_origin]: formulário em iframe de origem cruzada — [URL]');
+          return JSON.stringify({
+            tipo: 'PERMANENTE',
+            acao: 'PULAR',
+            codigo: 'iframe_cross_origin',
+            mensagem: 'Falha permanente: o formulário está em iframe de outro domínio e o navegador bloqueia o acesso. Vaga registrada — NUNCA tente de novo. Pule para a próxima.',
+          });
         }
 
         if (ehFalhaPermanente(codigoFalha)) {
@@ -1166,10 +1208,10 @@ export function criarExecutorDeTools(
             titulo_vaga: (args.titulo_vaga as string) || undefined,
             empresa: (args.empresa as string) || undefined,
             plataforma: (args.plataforma as string) || undefined,
-            motivo_pulo: `PERMANENTE:${codigoFalha} — ${descricaoFalha}`,
+            motivo_pulo: `PERMANENTE:${codigoFalha} — [DESCRICAO]`,
           });
           tentativasPorUrl.delete(urlVaga);
-          log('FALHA', `PERMANENTE [${codigoFalha}]: ${descricaoFalha} — ${chaveVaga(urlVaga)}`);
+          log('FALHA', `PERMANENTE [${codigoFalha}]: [DESCRICAO] — [URL]`);
 
           return JSON.stringify({
             tipo: 'PERMANENTE',
@@ -1190,10 +1232,10 @@ export function criarExecutorDeTools(
               titulo_vaga: (args.titulo_vaga as string) || undefined,
               empresa: (args.empresa as string) || undefined,
               plataforma: (args.plataforma as string) || undefined,
-              motivo_pulo: `ESGOTADO:${codigoFalha} — ${tentativasAtuais} tentativas — ${descricaoFalha}`,
+              motivo_pulo: `ESGOTADO:${codigoFalha} — ${tentativasAtuais} tentativas — [DESCRICAO]`,
             });
             tentativasPorUrl.delete(urlVaga);
-            log('FALHA', `ESGOTADO [${codigoFalha}]: ${tentativasAtuais}/${MAX_TENTATIVAS} tentativas — ${chaveVaga(urlVaga)}`);
+            log('FALHA', `ESGOTADO [${codigoFalha}]: ${tentativasAtuais}/${MAX_TENTATIVAS} tentativas — [URL]`);
 
             return JSON.stringify({
               tipo: 'ESGOTADO',
@@ -1205,7 +1247,7 @@ export function criarExecutorDeTools(
           }
 
           const backoffMs = calcularBackoff(tentativasAtuais);
-          log('FALHA', `RETRIAVEL [${codigoFalha}]: tentativa ${tentativasAtuais}/${MAX_TENTATIVAS}, backoff ${backoffMs}ms — ${chaveVaga(urlVaga)}`);
+          log('FALHA', `RETRIAVEL [${codigoFalha}]: tentativa ${tentativasAtuais}/${MAX_TENTATIVAS}, backoff ${backoffMs}ms — [URL]`);
 
           // Aguarda backoff antes de liberar o agente para retentar
           await new Promise(resolve => setTimeout(resolve, backoffMs));
@@ -1222,10 +1264,10 @@ export function criarExecutorDeTools(
         }
 
         // Código desconhecido — trata como permanente por segurança
-        log('FALHA', `DESCONHECIDO [${codigoFalha}]: ${descricaoFalha} — ${chaveVaga(urlVaga)}`);
+        log('FALHA', `DESCONHECIDO [${codigoFalha}]: [DESCRICAO] — [URL]`);
         registrarVagaVista({
           url: urlVaga,
-          motivo_pulo: `DESCONHECIDO:${codigoFalha} — ${descricaoFalha}`,
+          motivo_pulo: `DESCONHECIDO:${codigoFalha} — [DESCRICAO]`,
         });
 
         return JSON.stringify({
@@ -1310,7 +1352,7 @@ export function criarExecutorDeTools(
         const screenshotB64 = args.screenshot_base64 as string;
         const urlCaptcha = args.url_vaga as string;
 
-        log('FALHA', `CAPTCHA detectado em: ${chaveVaga(urlCaptcha)}. Pedindo resolucao MANUAL via Telegram...`);
+        log('FALHA', `CAPTCHA detectado em: [URL]. Pedindo resolucao MANUAL via Telegram...`);
 
         try {
           const status = await solicitarResolucaoCaptcha(screenshotB64, urlCaptcha);

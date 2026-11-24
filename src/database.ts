@@ -257,7 +257,7 @@ export function registrarVagaVista(dados: {
     const chave = chaveVaga(dados.url);
     const bloqueio = verificarBloqueioPermanente(dados.url);
     if (bloqueio) {
-      log('AGENTE', `Vaga revisitada ignorada (já reprovada permanentemente): ${chave} — ${bloqueio.slice(0, 80)}`);
+      log('AGENTE', `Vaga revisitada ignorada (já reprovada permanentemente): [URL] — ${bloqueio.slice(0, 80)}`);
       return false;
     }
     db.prepare(`

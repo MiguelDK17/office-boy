@@ -43,6 +43,31 @@ export function ehPaginaDeLogin(texto: string): boolean {
 }
 
 /**
+ * Portais onde a BUSCA abre sem login, mas a CANDIDATURA exige conta.
+ * `ehPaginaDeLogin` não pega esse caso: a URL é de busca, não de login, e o
+ * run inteiro é gasto até descobrir no botão "Enviar".
+ */
+export function exigeLoginParaCandidatar(site: string, texto: string): boolean {
+  const inicio = texto.slice(0, 8000).toLowerCase();
+  const url = texto.slice(0, 2000).toLowerCase();
+  const logado = /minha conta|\bsair\b|meu perfil|ol[aá],?\s+\w+/.test(inicio);
+  if (logado) return false;
+
+  if (/catho/i.test(site)) {
+    // Sinal forte: cadastro para VER/CANDIDATAR-SE. "Cadastre-se agora" sozinho
+    // é CTA de newsletter e aparece até para usuário logado.
+    return /\/vagas\//.test(url)
+      && /cadastre[- ]se para ver|cadastre[- ]se agora para ver|entre ou cadastre[- ]se para/.test(inicio);
+  }
+  if (/indeed/i.test(site)) {
+    // Busca com vjk NÃO é vaga: precisa ser /viewjob ou /jobs/view/<id>.
+    const vagaEspecifica = /\/viewjob|\/jobs\/view\/\d+/.test(url);
+    return vagaEspecifica && /sign in to apply|entre para candidatar|sign in to see|entre com sua conta para/i.test(inicio);
+  }
+  return false;
+}
+
+/**
  * Extrai texto do retorno bruto de `mcpClient.callTool`, preservando o
  * payload intacto: partes `text` são concatenadas; partes não-texto viram
  * JSON. Retorna 'OK' quando não há conteúdo.
@@ -153,7 +178,7 @@ export async function verificarSessoes(
     }
 
     let status: StatusSessao;
-    if (ehPaginaDeLogin(texto)) {
+    if (ehPaginaDeLogin(texto) || exigeLoginParaCandidatar(site.nome, texto)) {
       status = 'login_exigido';
     } else if (texto.startsWith('ERRO_TOOL') || /net::ERR_|Navigation timeout/i.test(texto.slice(0, 500))) {
       status = 'erro';

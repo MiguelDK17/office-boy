@@ -2,16 +2,17 @@
 // URL alvo antes de desistir) e health check pré-run dos sites configurados.
 
 import { describe, it, expect } from 'vitest';
+import { exigeLoginParaCandidatar } from '../src/sessao';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const sessao = readFileSync(path.resolve(__dirname, '..', 'src', 'sessao.ts'), 'utf-8');
+const agente = readFileSync(path.resolve(__dirname, '..', 'src', 'agente.ts'), 'utf-8');
+const index = readFileSync(path.resolve(__dirname, '..', 'src', 'index.ts'), 'utf-8');
 
 describe('módulo de sessão — contrato', () => {
-  const sessao = readFileSync(path.resolve(__dirname, '..', 'src', 'sessao.ts'), 'utf-8');
-  const agente = readFileSync(path.resolve(__dirname, '..', 'src', 'agente.ts'), 'utf-8');
-  const index = readFileSync(path.resolve(__dirname, '..', 'src', 'index.ts'), 'utf-8');
 
   it('o guard pede VERIFICAÇÃO da sessão (re-navegar a URL alvo) antes de reportar falha', () => {
     // Cenário + Ação + Validação: o aviso instrui o teste determinístico
@@ -58,5 +59,39 @@ describe('módulo de sessão — contrato', () => {
   it('agente.ts reexporta as funções movidas (compatibilidade de imports/testes)', () => {
     // Cenário + Ação + Validação
     expect(agente).toContain("export { ehPaginaDeLogin, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js'");
+  });
+});
+
+describe('sessão anônima em portais que abrem a busca sem login', () => {
+  it('Catho: detecta o aviso de cadastro PARA CANDIDATAR-SE', () => {
+    const pagina = '- Page URL: https://www.catho.com.br/vagas/desenvolvedor-android/\n' +
+      'Vagas de emprego ... Cadastre-se para ver todas as oportunidades e se candidatar.';
+    expect(exigeLoginParaCandidatar('Catho', pagina)).toBe(true);
+    expect(exigeLoginParaCandidatar('Catho', 'Resultados de busca sem aviso de cadastro')).toBe(false);
+  });
+
+  it('Catho logada: CTA de newsletter NÃO dispara falso positivo', () => {
+    const pagina = '- Page URL: https://www.catho.com.br/vagas/desenvolvedor-android/\n' +
+      'Olá, Miguel. Minha conta. Cadastre-se agora para receber vagas por e-mail.';
+    expect(exigeLoginParaCandidatar('Catho', pagina)).toBe(false);
+  });
+
+  it('Indeed: detecta sign-in para candidatar em /viewjob', () => {
+    const pagina = '- Page URL: https://br.indeed.com/viewjob?jk=abc123\n' +
+      'Sign in to apply to this job.';
+    expect(exigeLoginParaCandidatar('Indeed', pagina)).toBe(true);
+    // Busca com vjk não é vaga específica.
+    expect(exigeLoginParaCandidatar('Indeed', '- Page URL: https://br.indeed.com/jobs?q=android&vjk=abc123 Sign in to apply')).toBe(false);
+  });
+
+  it('o agente recebe a lista de sites com sessão quebrada e os remove da rodada', () => {
+    expect(agente).toMatch(/sitesBloqueados: string\[\] = \[\]/);
+    expect(agente).toMatch(/s\.ativo && !bloqueados\.has\(s\.nome\.toLowerCase\(\)\)/);
+    expect(index).toMatch(/sessoes\.filter\(s => s\.status === 'login_exigido'\)\.map\(s => s\.site\)/);
+  });
+
+  it('logs de argumentos de tool nunca devolvem algo que pareça URL navegável', () => {
+    expect(agente).toContain("copia[chave] = '[URL]'");
+    expect(agente).not.toMatch(/copia\[chave\] = chaveVaga\(valor\)/);
   });
 });

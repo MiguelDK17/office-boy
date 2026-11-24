@@ -12,7 +12,13 @@ import { registrarUsoTokens, obterCustoTotal } from './token-tracker.js';
 import { perfilParaSystemPrompt } from './anonimizacao.js';
 import type { AgenteConfig, Perfil, SitesConfig } from './types.js';
 import { camposOpenRouter, ehOpenRouter } from './openrouter.js';
-import { chaveVaga } from './chave-vaga.js';
+
+/** Mascara qualquer URL em texto livre antes de ir para o log. */
+export function mascararTexto(texto: string): string {
+  return texto
+    .replace(/https?:\/\/\S+/gi, '[URL]')
+    .replace(/\burl:[^\s,;)]+/gi, '[URL]');
+}
 
 /** Redige URLs e blobs antes de escrever args de tool no log. */
 function redigirArgs(args: Record<string, unknown>): Record<string, unknown> {
@@ -21,7 +27,9 @@ function redigirArgs(args: Record<string, unknown>): Record<string, unknown> {
     const valor = copia[chave];
     if (typeof valor !== 'string') continue;
     if (/base64|screenshot/i.test(chave)) copia[chave] = '<redigido>';
-    else if (/url/i.test(chave)) copia[chave] = chaveVaga(valor);
+    // NUNCA usar chaveVaga aqui: o LLM lê este log e copiava `url:host/...`
+    // como argumento de browser_navigate (navegações ERR_ABORTED na run de 24/11).
+    else if (/url/i.test(chave)) copia[chave] = '[URL]';
   }
   return copia;
 }
@@ -450,18 +458,35 @@ export async function executarAgente(
   perfil: Perfil,
   sites: SitesConfig,
   config: AgenteConfig,
+  sitesBloqueados: string[] = [],
 ): Promise<string> {
   const client = criarClientAgente(config);
   // Sinalizador que o executor de tools seta quando a meta de qualidade é
   // atingida — o loop checa em cada fronteira de iteração (100% determinístico).
   const sinais = { metaAtingida: false };
-  const executarTool = criarExecutorDeTools(perfil, config, sinais);
-  const systemPrompt = buildSystemPrompt(perfil, sites, config);
 
-  const sitesAtivos = sites.sites.filter(s => s.ativo);
+  // Sites cuja sessão morreu no health check não entram na rodada: abrir a
+  // busca e descobrir no botão "Enviar" que exige login queima dezenas de
+  // iterações (foi o que aconteceu com Indeed/Catho). O filtro precisa vir
+  // ANTES do prompt — se os sites bloqueados aparecerem na lista, o LLM
+  // navega até eles de qualquer jeito.
+  const bloqueados = new Set(sitesBloqueados.map(n => n.toLowerCase()));
+  const sitesAtivos = sites.sites.filter(s => s.ativo && !bloqueados.has(s.nome.toLowerCase()));
   if (sitesAtivos.length === 0) {
-    return 'Nenhum site ativo configurado em sites.json. Adicione sites e tente novamente.';
+    return 'Nenhum site ativo com sessão válida. Faça login manual no Chrome do bot e tente novamente.';
   }
+  if (bloqueados.size > 0) {
+    log('AGENTE', `Sites ignorados (sessão inválida): ${[...bloqueados].join(', ')}`);
+  }
+  const systemPrompt = buildSystemPrompt(perfil, { ...sites, sites: sitesAtivos }, config);
+  // Mesma lista em forma de domínio para a barreira determinística do executor.
+  const dominiosBloqueados = sites.sites
+    .filter(s => bloqueados.has(s.nome.toLowerCase()) && s.urls_busca.length > 0)
+    .map(s => {
+      try { return new URL(s.urls_busca[0]).hostname.toLowerCase(); } catch { return ''; }
+    })
+    .filter(Boolean);
+  const executarTool = criarExecutorDeTools(perfil, config, sinais, dominiosBloqueados);
 
   log('AGENTE', `Iniciando com ${sitesAtivos.length} site(s) ativo(s)`);
   log('AGENTE', `Limite diario: ${config.limiteDiario} candidaturas`);
@@ -680,7 +705,7 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
         try {
           toolArgs = JSON.parse(tc.function.arguments || '{}') as Record<string, unknown>;
         } catch {
-          log('ERRO', `Argumentos invalidos para ${toolName}: ${(tc.function.arguments || '').substring(0, 100)}`);
+          log('ERRO', `Argumentos invalidos para ${toolName}: ${mascararTexto((tc.function.arguments || '').substring(0, 100))}`);
         }
         log('TOOL', `${toolName}(${JSON.stringify(redigirArgs(toolArgs)).substring(0, 100)}...)`);
 
@@ -717,10 +742,10 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
           }
         } catch (toolError) {
           resultado = `ERRO_TOOL: ${toolError instanceof Error ? toolError.message : String(toolError)}`;
-          log('ERRO', `Tool ${toolName} falhou: ${resultado}`);
+          log('ERRO', `Tool ${toolName} falhou: ${mascararTexto(resultado)}`);
         }
 
-        log('TOOL', `Resultado: ${resultado.substring(0, 150)}...`);
+        log('TOOL', `Resultado: ${mascararTexto(resultado.substring(0, 150))}...`);
 
         // Guarda anti-loop genérica: a MESMA chamada repetida não traz
         // progresso e só queima cota. A partir da 3ª repetição, o aviso entra
