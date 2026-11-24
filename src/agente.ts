@@ -12,6 +12,19 @@ import { registrarUsoTokens, obterCustoTotal } from './token-tracker.js';
 import { perfilParaSystemPrompt } from './anonimizacao.js';
 import type { AgenteConfig, Perfil, SitesConfig } from './types.js';
 import { camposOpenRouter, ehOpenRouter } from './openrouter.js';
+import { chaveVaga } from './chave-vaga.js';
+
+/** Redige URLs e blobs antes de escrever args de tool no log. */
+function redigirArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const copia: Record<string, unknown> = { ...args };
+  for (const chave of Object.keys(copia)) {
+    const valor = copia[chave];
+    if (typeof valor !== 'string') continue;
+    if (/base64|screenshot/i.test(chave)) copia[chave] = '<redigido>';
+    else if (/url/i.test(chave)) copia[chave] = chaveVaga(valor);
+  }
+  return copia;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Teto de iterações do loop agora é configurável (AgenteConfig.maxIteracoes,
@@ -36,14 +49,15 @@ function buildSystemPrompt(perfil: Perfil, sites: SitesConfig, config: AgenteCon
   return `
 Voce e um agente inteligente de candidatura automatica a vagas de emprego.
 Voce controla um navegador real (Chrome do usuario, ja logado nos sites) atraves das browser tools.
-${dryRun ? '\n** MODO DRY-RUN ATIVO: faca TODO o processo normalmente (navegar, analisar, preencher formularios) mas NAO envie de verdade. O sistema BLOQUEIA o envio automaticamente quando voce chama confirmar_envio. Registre a candidatura com registrar_candidatura (sera gravada como dry-run). **\n' : ''}
+${dryRun ? '\n** MODO DRY-RUN ATIVO: faca TODO o processo normalmente (navegar, analisar, preencher formularios) mas NAO envie de verdade. O sistema BLOQUEIA o envio e JA registra a candidatura como dry-run quando voce chama confirmar_envio com todos os dados. **\n' : ''}
 
 ## Seu Objetivo
 Navegar pelos sites configurados, buscar vagas relevantes e se candidatar automaticamente.
 
 ## META DA EXECUCAO (critério de encerramento)
 - A meta desta execucao e registrar ${metaCandidaturas > 0 ? `${metaCandidaturas} candidatura(s) de qualidade (score >= ${scoreMinimo})` : 'o maximo de candidaturas de qualidade (score >= ' + scoreMinimo + ')'}.
-- Ao atingir a meta, o SISTEMA encerra a execucao automaticamente (aviso no retorno de registrar_candidatura). A partir dai NAO se candidate a mais nenhuma vaga.
+- Ao atingir a meta, o SISTEMA encerra a execucao automaticamente (aviso no retorno de registrar_candidatura OU confirmar_envio). A partir dai NAO se candidate a mais nenhuma vaga.
+- confirmar_envio REGISTRA a candidatura no banco no ato do clique. Passe sempre: url_vaga, plataforma, titulo_vaga, empresa e score. Depois de liberado, clique no botao final e NAO precisa chamar registrar_candidatura novamente (seria ignorado como duplicata).
 - Enquanto a meta NAO for atingida, NAO PARE: continue navegando pelos sites e paginas restantes.
 - TEXTO PURO NUNCA encerra a execucao. Resumo conversacional, desculpa ou "pronto, terminei" sao recusados pelo sistema — so tools avancam o trabalho.
 
@@ -82,7 +96,7 @@ Regras:
   antigas expiram ("Ref eN not found in the snapshot").
    m. ANTES de clicar no botao final de envio/submissao, SEMPRE chame confirmar_envio. Se a resposta bloquear (dry-run ou teto por execucao), NAO clique no botao — siga a instrucao da mensagem.
    n. Apos enviar (ou simular no dry-run), use salvar_screenshot para capturar prova
-   o. Use registrar_candidatura para salvar no banco (inclua o score da vaga)
+   o. confirmar_envio ja salva a candidatura no banco (passe plataforma, titulo_vaga, empresa e score). Chame-o ANTES do clique final; NAO precisa chamar registrar_candidatura depois.
    p. Se a vaga foi PULADA (score baixo, localizacao errada), use registrar_vaga_vista para nao reanalisar
 5. Se houver botao de "proxima pagina" ou paginacao, navegue para a proxima pagina e repita os passos 3-4
 6. Passe para o proximo site
@@ -129,7 +143,7 @@ Antes de se candidatar a QUALQUER vaga, SEMPRE use a tool "pontuar_vaga" passand
 - Seja conciso: 2-4 frases para campos curtos, 1 paragrafo para campos longos.
 
 ## Regras de Seguranca
-- ENVIO (CRITICO): antes de QUALQUER clique de envio final (candidatar-se, enviar, submeter, finalizar) ou de enviar convite/mensagem ao recrutador, SEMPRE chame confirmar_envio primeiro. O sistema decide se libera (e a trava de seguranca do usuario). NUNCA clique no botao final sem passar por confirmar_envio.
+- ENVIO (CRITICO): antes de QUALQUER clique de envio final (candidatar-se, enviar, submeter, finalizar) ou de enviar convite/mensagem ao recrutador, SEMPRE chame confirmar_envio primeiro — com url_vaga, plataforma, titulo_vaga, empresa e score. O sistema decide se libera e JA grava a candidatura. NUNCA clique no botao final sem passar por confirmar_envio.
 - Se encontrar CAPTCHA ou desafio anti-bot: use resolver_captcha_telegram para pedir resolucao MANUAL do humano. (reCAPTCHA/Turnstile NAO tem "solucao de texto" para digitar — quem resolve e o humano, no proprio Chrome aberto.)
   1. Tire screenshot com browser_take_screenshot
   2. Chame resolver_captcha_telegram passando o base64 e a URL (o humano resolve no Chrome e responde OK ou PULAR)
@@ -277,7 +291,7 @@ O sistema classifica automaticamente e decide se deve pular ou retentar.
 4. NAO tente resolver falhas permanentes — pule e siga em frente
 
 ## Ao Finalizar
-O run encerra por acao do SISTEMA (meta de qualidade atingida ou teto de iteracoes) — nao por texto seu. Faca o resumo final APENAS quando o sistema avisar a meta atingida no retorno de registrar_candidatura; inclua:
+O run encerra por acao do SISTEMA (meta de qualidade atingida ou teto de iteracoes) — nao por texto seu. Faca o resumo final APENAS quando o sistema avisar a meta atingida no retorno de confirmar_envio (ou registrar_candidatura); inclua:
 - Quantas candidaturas foram feitas
 - Em quais empresas/vagas
 - Se houve algum erro ou bloqueio (inclua os codigos de falha)
@@ -668,7 +682,7 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
         } catch {
           log('ERRO', `Argumentos invalidos para ${toolName}: ${(tc.function.arguments || '').substring(0, 100)}`);
         }
-        log('TOOL', `${toolName}(${JSON.stringify(toolArgs).substring(0, 100)}...)`);
+        log('TOOL', `${toolName}(${JSON.stringify(redigirArgs(toolArgs)).substring(0, 100)}...)`);
 
         // Rastreia a última URL pedida — o guard de login usa para mandar o
         // agente voltar exatamente à página que estava processando.

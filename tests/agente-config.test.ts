@@ -40,7 +40,7 @@ describe('ehPaginaDeLogin — detecção de sessão expirada', () => {
   it('detecta página de login de outros portais', () => {
     // Cenário + Ação + Validação
     expect(ehPaginaDeLogin('Page URL: https://portal.gupy.io/signin\n- text: Entre com sua conta')).toBe(true);
-    expect(ehPaginaDeLogin('https://vagas.com.br/login - Fazer login')).toBe(true);
+    expect(ehPaginaDeLogin('https://catho.com.br/login - Fazer login')).toBe(true);
   });
 
   it('não confunde uma listagem normal com página de login', () => {

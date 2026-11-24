@@ -3,12 +3,41 @@ import { mkdirSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { log } from './logger.js';
+import { chaveVaga } from './chave-vaga.js';
 import type { Candidatura } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.resolve(__dirname, '..', 'data', 'candidaturas.db');
 
 let db: Database.Database;
+
+/**
+ * Preenche a chave canônica nos registros antigos e cria índice único.
+ * Se o banco já tiver duas candidaturas para a mesma vaga (URLs diferentes),
+ * mantém os registros e usa índice comum — a verificação em código continua
+ * bloqueando. Nunca apaga histórico silently.
+ */
+function migrarChaveVaga(): void {
+  for (const tabela of ['candidaturas', 'vagas_vistas']) {
+    const colunas = db.prepare(`PRAGMA table_info(${tabela})`).all() as { name: string }[];
+    if (!colunas.some((c) => c.name === 'chave_vaga')) {
+      db.exec(`ALTER TABLE ${tabela} ADD COLUMN chave_vaga TEXT`);
+    }
+    const linhas = db.prepare(`SELECT id, url FROM ${tabela} WHERE chave_vaga IS NULL`).all() as {
+      id: number;
+      url: string;
+    }[];
+    const atualizar = db.prepare(`UPDATE ${tabela} SET chave_vaga = ? WHERE id = ?`);
+    for (const linha of linhas) atualizar.run(chaveVaga(linha.url), linha.id);
+
+    try {
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_${tabela}_chave ON ${tabela}(chave_vaga) WHERE chave_vaga IS NOT NULL`);
+    } catch {
+      log('WARN', `Banco: ${tabela} tem chaves repetidas no histórico — usando índice não único`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_${tabela}_chave ON ${tabela}(chave_vaga)`);
+    }
+  }
+}
 
 export function inicializarBanco(dbPath: string = DB_PATH): Database.Database {
   // better-sqlite3 NÃO cria o diretório pai do arquivo .db. Como data/ está no
@@ -31,7 +60,8 @@ export function inicializarBanco(dbPath: string = DB_PATH): Database.Database {
       data_aplicacao TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       mensagem_enviada INTEGER DEFAULT 0,
       status TEXT DEFAULT 'aplicado',
-      score INTEGER DEFAULT 0
+      score INTEGER DEFAULT 0,
+      chave_vaga TEXT
     )
   `);
 
@@ -54,7 +84,8 @@ export function inicializarBanco(dbPath: string = DB_PATH): Database.Database {
       plataforma TEXT,
       score INTEGER DEFAULT 0,
       motivo_pulo TEXT,
-      data_vista TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+      data_vista TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      chave_vaga TEXT
     )
   `);
 
@@ -100,35 +131,118 @@ export function inicializarBanco(dbPath: string = DB_PATH): Database.Database {
     )
   `);
 
+  // Depois de TODAS as tabelas criadas: preenche as chaves antigas e cria os
+  // índices únicos. Chamar antes deixava o banco sem vagas_vistas.
+  migrarChaveVaga();
+
   return db;
 }
 
 export function verificarJaAplicou(url: string): boolean {
-  const row = db.prepare('SELECT id FROM candidaturas WHERE url = ?').get(url);
+  const chave = chaveVaga(url);
+  // Dry-run NUNCA bloqueia uma execução real. Pendente bloqueia (clique em
+  // andamento), mas é limpo se o envio falhar.
+  const row = db.prepare(`
+    SELECT id FROM candidaturas
+    WHERE (chave_vaga = ? OR url = ?) AND status <> 'dry-run'
+    LIMIT 1
+  `).get(chave, url);
   return !!row;
 }
 
-export function registrarCandidatura(candidatura: Omit<Candidatura, 'id' | 'data_aplicacao'>): boolean {
+/** Confirma um registro 'pendente' depois que o clique de envio sucedeu. */
+export function confirmarRegistroPendente(url: string): boolean {
+  const chave = chaveVaga(url);
   try {
-    const result = db.prepare(`
-      INSERT OR IGNORE INTO candidaturas (plataforma, titulo_vaga, empresa, url, mensagem_enviada, status, score, screenshot_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      candidatura.plataforma,
-      candidatura.titulo_vaga,
-      candidatura.empresa,
-      candidatura.url,
-      candidatura.mensagem_enviada,
-      candidatura.status,
-      candidatura.score ?? 0,
-      candidatura.screenshot_path ?? null
-    );
-    // changes === 0 significa duplicata ignorada (URL já existe), não erro real.
-    return result.changes > 0;
+    const r = db.prepare(`
+      UPDATE candidaturas SET status = 'aplicado'
+      WHERE (chave_vaga = ? OR url = ?) AND status = 'pendente'
+    `).run(chave, url);
+    return r.changes > 0;
+  } catch (error) {
+    log('ERRO', `confirmarRegistroPendente falhou: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+/** Desfaz o registro provisório se o clique falhou (erro_mcp, CAPTCHA...). */
+export function removerPendente(url: string): boolean {
+  const chave = chaveVaga(url);
+  try {
+    return db.prepare("DELETE FROM candidaturas WHERE chave_vaga = ? AND status = 'pendente'").run(chave).changes > 0;
+  } catch (error) {
+    log('ERRO', `removerPendente falhou: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+/** Pendentes órfãos (processo morreu entre confirmar e clicar) expiram em 15 min. */
+export function limparPendentesAntigos(): number {
+  return db.prepare(`
+    DELETE FROM candidaturas
+    WHERE status = 'pendente'
+      AND datetime(data_aplicacao) < datetime('now', 'localtime', '-15 minutes')
+  `).run().changes;
+}
+
+export function registrarCandidatura(candidatura: Omit<Candidatura, 'id' | 'data_aplicacao'>): boolean {
+  const chave = chaveVaga(candidatura.url);
+  try {
+    // Verficação dentro da mesma transação do insert: mesmo sem índice único
+    // (banco com chaves históricas repetidas) não entra duplicata.
+    return db.transaction(() => {
+      const existe = db.prepare(`
+        SELECT id, status FROM candidaturas
+        WHERE chave_vaga = ? OR url = ?
+        LIMIT 1
+      `).get(chave, candidatura.url) as { id: number; status: string } | undefined;
+      if (existe) {
+        // Uma simulação não pode bloquear a vida real: promove o registro.
+        if (existe.status === 'dry-run' && candidatura.status !== 'dry-run') {
+          db.prepare(`
+            UPDATE candidaturas SET plataforma = ?, titulo_vaga = ?, empresa = ?, url = ?,
+              mensagem_enviada = ?, status = ?, score = ? WHERE id = ?
+          `).run(
+            candidatura.plataforma, candidatura.titulo_vaga, candidatura.empresa,
+            candidatura.url, candidatura.mensagem_enviada, candidatura.status,
+            candidatura.score ?? 0, existe.id,
+          );
+          return true;
+        }
+        return false;
+      }
+      const result = db.prepare(`
+        INSERT INTO candidaturas (plataforma, titulo_vaga, empresa, url, mensagem_enviada, status, score, screenshot_path, chave_vaga)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        candidatura.plataforma,
+        candidatura.titulo_vaga,
+        candidatura.empresa,
+        candidatura.url,
+        candidatura.mensagem_enviada,
+        candidatura.status,
+        candidatura.score ?? 0,
+        candidatura.screenshot_path ?? null,
+        chave
+      );
+      return result.changes > 0;
+    })();
   } catch (error) {
     log('ERRO', `registrarCandidatura falhou: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
+}
+
+/** Motivo permanente registrado antes para esta mesma vaga (ou null). */
+export function verificarBloqueioPermanente(url: string): string | null {
+  const chave = chaveVaga(url);
+  const row = db.prepare(`
+    SELECT motivo_pulo FROM vagas_vistas
+    WHERE (chave_vaga = ? OR url = ?)
+      AND (motivo_pulo LIKE 'PERMANENTE:%' OR motivo_pulo LIKE 'ESGOTADO:%')
+    LIMIT 1
+  `).get(chave, url) as { motivo_pulo: string } | undefined;
+  return row?.motivo_pulo ?? null;
 }
 
 export function registrarVagaVista(dados: {
@@ -140,18 +254,24 @@ export function registrarVagaVista(dados: {
   motivo_pulo?: string;
 }): boolean {
   try {
+    const chave = chaveVaga(dados.url);
+    const bloqueio = verificarBloqueioPermanente(dados.url);
+    if (bloqueio) {
+      log('AGENTE', `Vaga revisitada ignorada (já reprovada permanentemente): ${chave} — ${bloqueio.slice(0, 80)}`);
+      return false;
+    }
     db.prepare(`
-      INSERT OR IGNORE INTO vagas_vistas (url, titulo_vaga, empresa, plataforma, score, motivo_pulo)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO vagas_vistas (url, titulo_vaga, empresa, plataforma, score, motivo_pulo, chave_vaga)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       dados.url,
       dados.titulo_vaga ?? null,
       dados.empresa ?? null,
       dados.plataforma ?? null,
       dados.score ?? 0,
-      dados.motivo_pulo ?? null
+      dados.motivo_pulo ?? null,
+      chave
     );
-    // Idempotente: marcar uma vaga já vista de novo é sucesso (não erro).
     return true;
   } catch (error) {
     log('ERRO', `registrarVagaVista falhou: ${error instanceof Error ? error.message : String(error)}`);
@@ -160,7 +280,8 @@ export function registrarVagaVista(dados: {
 }
 
 export function verificarVagaJaVista(url: string): boolean {
-  const row = db.prepare('SELECT id FROM vagas_vistas WHERE url = ?').get(url);
+  const chave = chaveVaga(url);
+  const row = db.prepare('SELECT id FROM vagas_vistas WHERE chave_vaga = ? OR url = ?').get(chave, url);
   return !!row;
 }
 
@@ -221,7 +342,7 @@ export function obterEstatisticas() {
 export function contarCandidaturasHoje(): number {
   const row = db.prepare(`
     SELECT COUNT(*) as total FROM candidaturas
-    WHERE date(data_aplicacao) = date('now', 'localtime')
+    WHERE date(data_aplicacao) = date('now', 'localtime') AND status <> 'dry-run'
   `).get() as { total: number };
   return row.total;
 }
@@ -232,10 +353,10 @@ export function listarCandidaturas(limite: number = 50): Candidatura[] {
   `).all(limite) as Candidatura[];
 }
 
-/** Candidaturas (reais e dry-run) registradas a partir de um timestamp local "YYYY-MM-DD HH:MM:SS". */
+/** Candidaturas reais registradas a partir de um timestamp local "YYYY-MM-DD HH:MM:SS". */
 export function contarCandidaturasDesde(tsLocal: string): number {
   const row = db.prepare(`
-    SELECT COUNT(*) as total FROM candidaturas WHERE data_aplicacao >= ?
+    SELECT COUNT(*) as total FROM candidaturas WHERE data_aplicacao >= ? AND status <> 'dry-run'
   `).get(tsLocal) as { total: number };
   return row.total;
 }

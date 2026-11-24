@@ -4,6 +4,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   verificarJaAplicou,
+  verificarBloqueioPermanente,
+  confirmarRegistroPendente,
+  removerPendente,
+  limparPendentesAntigos,
   registrarCandidatura,
   contarCandidaturasHoje,
   listarCandidaturas,
@@ -31,13 +35,15 @@ import {
 } from './erros.js';
 import { pontuarVaga } from './scoring.js';
 import { estaNaBlacklist } from './blacklist.js';
+import { chaveVaga } from './chave-vaga.js';
+import { urlAtualDoChrome } from './url-pagina.js';
 import type { Perfil, RespostasPredefinidas, AgenteConfig } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Deriva o domínio registrável de uma URL (ex.: portal.gupy.io -> gupy.io,
- * www.vagas.com.br -> vagas.com.br). Usado para agrupar URLs do mesmo portal e
+ * www.catho.com.br -> catho.com.br). Usado para agrupar URLs do mesmo portal e
  * abandonar o portal inteiro quando ele bloqueia na entrada. Retorna '' se a URL
  * for inválida.
  */
@@ -122,7 +128,7 @@ const customToolDefs: CustomToolDef[] = [
       properties: {
         plataforma: {
           type: "string",
-          description: 'Nome da plataforma (ex: Gupy, LinkedIn, Vagas.com)',
+          description: 'Nome da plataforma (ex: Gupy, LinkedIn, Catho)',
         },
         titulo_vaga: {
           type: "string",
@@ -163,8 +169,28 @@ const customToolDefs: CustomToolDef[] = [
           type: "string",
           description: 'O que sera enviado (ex: "candidatura", "mensagem ao recrutador")',
         },
+        plataforma: {
+          type: "string",
+          description: 'Portal da vaga (Gupy, LinkedIn, Catho...). Necessario para registrar no ato do envio.',
+        },
+        titulo_vaga: {
+          type: "string",
+          description: 'Titulo da vaga — necessario para registrar no ato do envio.',
+        },
+        empresa: {
+          type: "string",
+          description: 'Empresa da vaga — necessario para registrar no ato do envio.',
+        },
+        score: {
+          type: "number",
+          description: 'Score calculado por pontuar_vaga (1-10).',
+        },
+        mensagem_enviada: {
+          type: "boolean",
+          description: 'Se uma mensagem personalizada foi enviada ao recrutador.',
+        },
       },
-      required: ['url_vaga'],
+      required: ['url_vaga', 'plataforma', 'titulo_vaga', 'empresa', 'score'],
     },
   },
   {
@@ -321,7 +347,7 @@ const customToolDefs: CustomToolDef[] = [
         },
         plataforma: {
           type: "string",
-          description: 'Plataforma (Gupy, Vagas.com, etc.)',
+          description: 'Plataforma (Gupy, Catho, etc.)',
         },
         score: {
           type: "number",
@@ -465,7 +491,7 @@ const customToolDefs: CustomToolDef[] = [
         },
         plataforma: {
           type: "string",
-          description: 'Plataforma (Gupy, Vagas.com, etc.)',
+          description: 'Plataforma (Gupy, Catho, etc.)',
         },
       },
       required: ['url_vaga', 'codigo_falha', 'descricao'],
@@ -647,9 +673,85 @@ export function criarExecutorDeTools(
   // no banco) nesta execução. Ao atingir META_CANDIDATURAS, o run encerra com
   // SUCESSO — nunca por texto do modelo (ver guarda anti-abandono).
   let candidaturasQualidade = 0;
+  // Score calculado por pontuar_vaga neste run — evita depender de o LLM
+  // repetir o número depois no confirmar_envio.
+  limparPendentesAntigos();
+  const scorePorVaga = new Map<string, number>();
+  const chaveScore = (titulo: string, empresa: string) =>
+    `${(titulo || '').trim().toLowerCase()}|${(empresa || '').trim().toLowerCase()}`;
+  // A aba ativa nem sempre é a da vaga: só confiar nela se for o MESMO portal.
+  const urlRealConfiavel = (informada: string, real: string | null): string | null => {
+    if (!real) return null;
+    try {
+      return new URL(informada).hostname === new URL(real).hostname ? real : null;
+    } catch {
+      return null;
+    }
+  };
   // Portais que bloquearam na entrada NESTA execução — abandonados por completo
   // (não adianta tentar outras URLs/páginas; só queima iterações e risco de ban).
   const portaisBloqueados = new Set<string>();
+
+  /**
+   * Registro determinístico com os mesmos gates da tool registrar_candidatura.
+   * Também é chamado pelo confirmar_envio: assim o clique de envio nunca fica
+   * sem registro só porque o LLM esqueceu de chamar a tool depois.
+   */
+  function registrarComGates(dados: {
+    plataforma: string;
+    titulo_vaga: string;
+    empresa: string;
+    url: string;
+    mensagem_enviada?: boolean;
+    score?: number;
+    status?: string;
+  }): { registrado: boolean; motivo?: string; mensagem?: string; metaAtingida?: boolean } {
+    // Usa o score calculado por pontuar_vaga se o LLM não repetiu o número.
+    const score = dados.score
+      || scorePorVaga.get(chaveScore(dados.titulo_vaga, dados.empresa))
+      || 0;
+    const bl = estaNaBlacklist(dados.empresa, dados.titulo_vaga, perfil.blacklist_empresas, perfil.blacklist_termos_titulo);
+    if (bl.bloqueado) {
+      log('AGENTE', `Candidatura BLOQUEADA (blacklist): ${dados.titulo_vaga} — ${dados.empresa}`);
+      return { registrado: false, motivo: 'BLACKLIST', mensagem: `${bl.motivo}. Candidatura NAO registrada.` };
+    }
+    if (score < config.scoreMinimo) {
+      log('AGENTE', `Candidatura BLOQUEADA (score ${score} < minimo ${config.scoreMinimo}): ${dados.titulo_vaga} — ${dados.empresa}`);
+      return {
+        registrado: false,
+        motivo: 'SCORE_ABAIXO_DO_MINIMO',
+        mensagem: `Score ${score} abaixo do minimo ${config.scoreMinimo}. Candidatura NAO registrada — pule para a proxima vaga.`,
+      };
+    }
+    const sucesso = registrarCandidatura({
+      plataforma: dados.plataforma,
+      titulo_vaga: dados.titulo_vaga,
+      empresa: dados.empresa,
+      url: dados.url,
+      mensagem_enviada: dados.mensagem_enviada ? 1 : 0,
+      status: dados.status ?? (config.dryRun ? 'dry-run' : 'aplicado'),
+      score,
+    });
+    if (!sucesso) return { registrado: false, motivo: 'DUPLICATA_OU_ERRO', mensagem: 'Candidatura ja registrada ou falha ao gravar.' };
+
+    log('AGENTE', `Candidatura registrada: ${dados.titulo_vaga} — ${dados.empresa} (score: ${score})`);
+    notificarCandidatura(dados.empresa, dados.titulo_vaga, score, config.dryRun).catch(() => {});
+    if (config.metaCandidaturas > 0) {
+      candidaturasQualidade++;
+      log('AGENTE', `Meta de qualidade: ${candidaturasQualidade}/${config.metaCandidaturas} candidatura(s) nesta execucao.`);
+      if (candidaturasQualidade >= config.metaCandidaturas) {
+        log('AGENTE', `META DE QUALIDADE ATINGIDA (${candidaturasQualidade}/${config.metaCandidaturas}) — a execucao sera encerrada com sucesso.`);
+        if (sinais) sinais.metaAtingida = true;
+        return {
+          registrado: true,
+          metaAtingida: true,
+          mensagem: `META DE QUALIDADE ATINGIDA: ${candidaturasQualidade}/${config.metaCandidaturas}. NAO se candidate a mais nenhuma vaga — a execucao sera encerrada agora.`,
+        };
+      }
+    }
+    return { registrado: true };
+  }
+
   return async function executarTool(name: string, args: Record<string, unknown>): Promise<string> {
     switch (name) {
       case 'obter_perfil_candidato': {
@@ -657,117 +759,91 @@ export function criarExecutorDeTools(
       }
 
       case 'verificar_ja_aplicou': {
-        const url = args.url as string;
-        const jaAplicou = verificarJaAplicou(url);
+        const informada = args.url as string;
+        const real = urlRealConfiavel(informada, await urlAtualDoChrome());
+        // Confere tanto a URL informada quanto a da aba real: uma pode estar na
+        // etapa do formulário e a outra ser a vaga (Gupy).
+        const jaAplicou = verificarJaAplicou(informada) || (real ? verificarJaAplicou(real) : false);
+        const bloqueio = verificarBloqueioPermanente(informada)
+          || (real ? verificarBloqueioPermanente(real) : null);
+        if (bloqueio) {
+          return `JA_REPROVADA: esta vaga ja foi analisada e descartada (${bloqueio.slice(0, 120)}). Pule para a proxima.`;
+        }
         return jaAplicou
           ? 'JA_APLICOU: O candidato ja se candidatou a esta vaga. Pule para a proxima.'
           : 'NOVA_VAGA: O candidato ainda nao se candidatou. Pode prosseguir.';
       }
 
       case 'registrar_candidatura': {
-        const score = (args.score as number) || 0;
-        const empresa = args.empresa as string;
-        const tituloVaga = args.titulo_vaga as string;
-
-        // Guard de blacklist (garantia por construcao, mesmo se o agente furar o pre-filtro).
-        const blReg = estaNaBlacklist(empresa, tituloVaga, perfil.blacklist_empresas, perfil.blacklist_termos_titulo);
-        if (blReg.bloqueado) {
-          log('AGENTE', `Candidatura BLOQUEADA (blacklist): ${tituloVaga} — ${empresa}`);
-          return JSON.stringify({
-            registrado: false,
-            motivo: 'BLACKLIST',
-            mensagem: `${blReg.motivo}. Candidatura NAO registrada. Pule para a proxima vaga.`,
-          });
-        }
-
-        // GATE DETERMINISTICO: o codigo garante por construcao que vagas abaixo
-        // do score minimo NUNCA sejam registradas, independente do que o LLM
-        // decida. Sem isso, o gate de score era apenas uma instrucao no prompt.
-        if (score < config.scoreMinimo) {
-          log('AGENTE', `Candidatura BLOQUEADA (score ${score} < minimo ${config.scoreMinimo}): ${tituloVaga} — ${empresa}`);
-          return JSON.stringify({
-            registrado: false,
-            motivo: 'SCORE_ABAIXO_DO_MINIMO',
-            mensagem: `Score ${score} abaixo do minimo ${config.scoreMinimo}. Candidatura NAO registrada. Se ainda nao pontuou esta vaga com pontuar_vaga, faca isso; se ja pontuou e ficou abaixo do minimo, PULE para a proxima vaga.`,
-          });
-        }
-
-        // Dry-run é autoritativo via config — não depende mais de o LLM lembrar
-        // de passar um argumento (que sequer era declarado na tool).
-        const isDryRun = config.dryRun;
-        const sucesso = registrarCandidatura({
+        const url = args.url as string;
+        // Se o confirmar_envio já marcou 'pendente', só confirmamos o clique.
+        const resultado = registrarComGates({
           plataforma: args.plataforma as string,
-          titulo_vaga: tituloVaga,
-          empresa,
-          url: args.url as string,
-          mensagem_enviada: args.mensagem_enviada ? 1 : 0,
-          status: isDryRun ? 'dry-run' : 'aplicado',
-          score,
+          titulo_vaga: args.titulo_vaga as string,
+          empresa: args.empresa as string,
+          url,
+          mensagem_enviada: Boolean(args.mensagem_enviada),
+          score: args.score as number | undefined,
         });
-        if (sucesso) {
-          log('AGENTE', `Candidatura registrada: ${tituloVaga} — ${empresa} (score: ${score})`);
-          notificarCandidatura(empresa, tituloVaga, score, isDryRun).catch(() => {});
-          // Contagem da meta de qualidade. O gate acima já garantiu
-          // score >= minimo, então TUDO que chega aqui é candidatura de
-          // qualidade — vale para produção e dry-run (o dry-run registra
-          // candidatura com status 'dry-run').
-          if (config.metaCandidaturas > 0) {
-            candidaturasQualidade++;
-            log('AGENTE', `Meta de qualidade: ${candidaturasQualidade}/${config.metaCandidaturas} candidatura(s) nesta execucao.`);
-            if (candidaturasQualidade >= config.metaCandidaturas) {
-              log('AGENTE', `META DE QUALIDADE ATINGIDA (${candidaturasQualidade}/${config.metaCandidaturas}) — a execucao sera encerrada com sucesso.`);
-              if (sinais) sinais.metaAtingida = true;
-              return JSON.stringify({
-                registrado: true,
-                meta_atingida: true,
-                mensagem: `META DE QUALIDADE ATINGIDA: ${candidaturasQualidade}/${config.metaCandidaturas} candidaturas de qualidade nesta execucao. NAO se candidate a mais nenhuma vaga — a execucao sera encerrada agora.`,
-              });
-            }
-          }
-        }
-        return sucesso
-          ? 'REGISTRADO: Candidatura salva no banco de dados com sucesso.'
-          : 'ERRO: Falha ao registrar candidatura (possivelmente duplicada).';
+        if (!resultado.registrado) confirmarRegistroPendente(url);
+        return JSON.stringify(resultado);
       }
 
       case 'confirmar_envio': {
-        const urlVaga = (args.url_vaga as string) || '';
+        const informada = (args.url_vaga as string) || '';
+        const real = urlRealConfiavel(informada, await urlAtualDoChrome());
+        // A URL da aba é a fonte da verdade; a informada complementa quando a
+        // aba está numa etapa do formulário (Gupy).
+        const urlVaga = real && chaveVaga(real) !== chaveVaga(informada) ? informada : (real || informada);
         const acao = (args.acao as string) || 'envio';
-
-        // Barreira determinística contra candidatura duplicada. Antes, esta
-        // checagem dependia do LLM lembrar de chamar verificar_ja_aplicou e a
-        // proteção do banco só acontecia depois do clique externo.
-        // Mensagens ao recrutador continuam permitidas após uma candidatura.
         const acaoNormalizada = acao.toLocaleLowerCase('pt-BR');
         const ehMensagemRecrutador = acaoNormalizada.includes('mensagem')
           && acaoNormalizada.includes('recrutador');
-        if (!ehMensagemRecrutador && verificarJaAplicou(urlVaga)) {
-          log('AGENTE', `Envio bloqueado: candidatura já registrada — ${urlVaga}`);
-          return JSON.stringify({
-            permitido: false,
-            motivo: 'JA_APLICOU',
-            mensagem: 'JA_APLICOU: esta vaga já possui candidatura registrada. NÃO clique no envio; pule para a próxima vaga.',
-          });
+
+        if (!ehMensagemRecrutador) {
+          const bloqueio = verificarBloqueioPermanente(urlVaga)
+            || verificarBloqueioPermanente(informada)
+            || (real ? verificarBloqueioPermanente(real) : null);
+          if (bloqueio) {
+            return JSON.stringify({
+              permitido: false,
+              motivo: 'JA_REPROVADA',
+              mensagem: `JA_REPROVADA: ${bloqueio.slice(0, 120)}. NÃO envie; pule para a proxima vaga.`,
+            });
+          }
+          if (verificarJaAplicou(informada) || (real ? verificarJaAplicou(real) : false)) {
+            log('AGENTE', `Envio bloqueado: candidatura já registrada — ${chaveVaga(urlVaga)}`);
+            return JSON.stringify({
+              permitido: false,
+              motivo: 'JA_APLICOU',
+              mensagem: 'JA_APLICOU: esta vaga já possui candidatura registrada. NÃO clique no envio; pule para a próxima vaga.',
+            });
+          }
         }
 
-        // CHECKPOINT DE ENVIO (cooperativo): o agente é instruído a chamar esta
-        // tool antes do clique de envio. Em dry-run respondemos "bloqueado" e
-        // aplicamos o teto, mas o clique em si é uma browser tool do MCP que o
-        // LLM controla — então isto reduz risco e conta os envios, NÃO é uma
-        // barreira física. A garantia 100% determinística de que nada vira
-        // candidatura "aplicada" está no gate de registrar_candidatura.
+        // Dry-run: bloqueia o clique, mas registra como dry-run no ato — o
+        // sistema não depende mais de o LLM chamar registrar_candidatura depois.
         if (config.dryRun) {
-          log('AGENTE', `DRY-RUN: envio bloqueado pelo sistema (${acao}) — ${urlVaga}`);
+          log('AGENTE', `DRY-RUN: envio bloqueado pelo sistema (${acao}) — ${chaveVaga(urlVaga)}`);
+          const r = ehMensagemRecrutador ? null : registrarComGates({
+            plataforma: (args.plataforma as string) || '',
+            titulo_vaga: (args.titulo_vaga as string) || '',
+            empresa: (args.empresa as string) || '',
+            url: urlVaga,
+            mensagem_enviada: Boolean(args.mensagem_enviada),
+            score: args.score as number | undefined,
+          });
           return JSON.stringify({
             permitido: false,
             modo: 'dry-run',
-            mensagem: `DRY-RUN: o envio (${acao}) foi BLOQUEADO pelo sistema. NAO clique no botao de envio final. Registre a candidatura com registrar_candidatura (sera gravada como dry-run) e siga para a proxima vaga.`,
+            registrado: r?.registrado ?? false,
+            mensagem: `DRY-RUN: o envio (${acao}) foi BLOQUEADO. NAO clique no botao final. ${r?.mensagem ?? 'Candidatura registrada como dry-run.'} Siga para a proxima vaga.`,
           });
         }
 
         // Teto por execução: trava determinística contra rajada de envios reais.
         if (enviosConfirmados >= config.maxPorExecucao) {
-          log('AGENTE', `Teto por execucao atingido (${config.maxPorExecucao}). Envio bloqueado — ${urlVaga}`);
+          log('AGENTE', `Teto por execucao atingido (${config.maxPorExecucao}). Envio bloqueado — ${chaveVaga(urlVaga)}`);
           return JSON.stringify({
             permitido: false,
             modo: 'producao',
@@ -776,12 +852,33 @@ export function criarExecutorDeTools(
           });
         }
 
+        // REGISTRO PROVISÓRIO: gravamos ANTES do clique como 'pendente'. Se o
+        // clique falhar, reportar_falha remove; se suceder, registrar_candidatura
+        // confirma. Se o LLM esquecer de confirmar, o pendente expira em 15 min
+        // em vez de virar candidatura fantasma permanente.
+        const r = ehMensagemRecrutador ? null : registrarComGates({
+          plataforma: (args.plataforma as string) || '',
+          titulo_vaga: (args.titulo_vaga as string) || '',
+          empresa: (args.empresa as string) || '',
+          url: urlVaga,
+          mensagem_enviada: Boolean(args.mensagem_enviada),
+          score: args.score as number | undefined,
+          status: 'pendente',
+        });
+        if (r && !r.registrado) {
+          return JSON.stringify({
+            permitido: false,
+            motivo: r.motivo,
+            mensagem: `Envio NAO liberado: ${r.mensagem} Pule para a proxima vaga.`,
+          });
+        }
         enviosConfirmados += 1;
-        log('AGENTE', `Envio liberado (${acao}) ${enviosConfirmados}/${config.maxPorExecucao} — ${urlVaga}`);
+        log('AGENTE', `Envio liberado (${acao}) ${enviosConfirmados}/${config.maxPorExecucao} — ${chaveVaga(urlVaga)}`);
         return JSON.stringify({
           permitido: true,
           modo: 'producao',
-          mensagem: 'PODE_ENVIAR: envio liberado pelo sistema. Pode clicar no botao de envio final agora.',
+          registrado: r?.registrado ?? false,
+          mensagem: `PODE_ENVIAR: envio liberado. Candidatura ${r?.registrado ? 'ja registrada' : 'nao registrada (mensagem ao recrutador)'}. Pode clicar no botao final agora.${r?.metaAtingida ? ' ' + r.mensagem : ''}`,
         });
       }
 
@@ -832,6 +929,10 @@ export function criarExecutorDeTools(
             eliminatorios: [blPontuar.motivo],
           });
         }
+        scorePorVaga.set(
+          chaveScore((args.titulo_vaga as string) || '', (args.empresa as string) || ''),
+          resultado.score,
+        );
         return JSON.stringify(resultado);
       }
 
@@ -945,7 +1046,7 @@ export function criarExecutorDeTools(
         });
         return sucesso
           ? 'REGISTRADO: Vaga marcada como vista.'
-          : 'ERRO: Falha ao registrar vaga vista.';
+          : 'JA_REPROVADA: esta vaga ja foi descartada permanentemente. NAO reanalise — pule para a proxima.';
       }
 
       case 'obter_respostas_predefinidas': {
@@ -1026,6 +1127,9 @@ export function criarExecutorDeTools(
         const codigoFalha = args.codigo_falha as string;
         const descricaoFalha = args.descricao as string;
         const dominio = dominioDe(urlVaga);
+        // Se o envio tinha sido liberado mas o clique falhou, desfaz o registro
+        // provisório — senão a vaga ficaria presa como "já aplicada" para sempre.
+        if (urlVaga) removerPendente(urlVaga);
 
         // P7: portal já bloqueado nesta execução — nem tenta, manda pular o site.
         if (dominio && portaisBloqueados.has(dominio)) {
@@ -1039,12 +1143,12 @@ export function criarExecutorDeTools(
         // Bloqueio explícito na ENTRADA do portal: abandona o portal inteiro.
         if (codigoFalha === 'portal_bloqueado') {
           if (dominio) portaisBloqueados.add(dominio);
-          log('FALHA', `PORTAL BLOQUEADO: ${dominio || urlVaga} — abandonando o portal nesta execucao`);
+          log('FALHA', `PORTAL BLOQUEADO: ${dominio || chaveVaga(urlVaga)} — abandonando o portal nesta execucao`);
           if (!config.dryRun) await new Promise(r => setTimeout(r, 30_000)); // pausa pós-bloqueio
           return JSON.stringify({
             tipo: 'PORTAL_BLOQUEADO',
             acao: 'PULAR_PORTAL',
-            mensagem: `Bloqueio na entrada do portal ${dominio || urlVaga}. NAO tente outras URLs nem pagine aqui. Va para o PROXIMO SITE da lista.`,
+            mensagem: `Bloqueio na entrada do portal ${dominio || chaveVaga(urlVaga)}. NAO tente outras URLs nem pagine aqui. Va para o PROXIMO SITE da lista.`,
           });
         }
 
@@ -1065,7 +1169,7 @@ export function criarExecutorDeTools(
             motivo_pulo: `PERMANENTE:${codigoFalha} — ${descricaoFalha}`,
           });
           tentativasPorUrl.delete(urlVaga);
-          log('FALHA', `PERMANENTE [${codigoFalha}]: ${descricaoFalha} — ${urlVaga}`);
+          log('FALHA', `PERMANENTE [${codigoFalha}]: ${descricaoFalha} — ${chaveVaga(urlVaga)}`);
 
           return JSON.stringify({
             tipo: 'PERMANENTE',
@@ -1089,7 +1193,7 @@ export function criarExecutorDeTools(
               motivo_pulo: `ESGOTADO:${codigoFalha} — ${tentativasAtuais} tentativas — ${descricaoFalha}`,
             });
             tentativasPorUrl.delete(urlVaga);
-            log('FALHA', `ESGOTADO [${codigoFalha}]: ${tentativasAtuais}/${MAX_TENTATIVAS} tentativas — ${urlVaga}`);
+            log('FALHA', `ESGOTADO [${codigoFalha}]: ${tentativasAtuais}/${MAX_TENTATIVAS} tentativas — ${chaveVaga(urlVaga)}`);
 
             return JSON.stringify({
               tipo: 'ESGOTADO',
@@ -1101,7 +1205,7 @@ export function criarExecutorDeTools(
           }
 
           const backoffMs = calcularBackoff(tentativasAtuais);
-          log('FALHA', `RETRIAVEL [${codigoFalha}]: tentativa ${tentativasAtuais}/${MAX_TENTATIVAS}, backoff ${backoffMs}ms — ${urlVaga}`);
+          log('FALHA', `RETRIAVEL [${codigoFalha}]: tentativa ${tentativasAtuais}/${MAX_TENTATIVAS}, backoff ${backoffMs}ms — ${chaveVaga(urlVaga)}`);
 
           // Aguarda backoff antes de liberar o agente para retentar
           await new Promise(resolve => setTimeout(resolve, backoffMs));
@@ -1118,7 +1222,7 @@ export function criarExecutorDeTools(
         }
 
         // Código desconhecido — trata como permanente por segurança
-        log('FALHA', `DESCONHECIDO [${codigoFalha}]: ${descricaoFalha} — ${urlVaga}`);
+        log('FALHA', `DESCONHECIDO [${codigoFalha}]: ${descricaoFalha} — ${chaveVaga(urlVaga)}`);
         registrarVagaVista({
           url: urlVaga,
           motivo_pulo: `DESCONHECIDO:${codigoFalha} — ${descricaoFalha}`,
@@ -1206,7 +1310,7 @@ export function criarExecutorDeTools(
         const screenshotB64 = args.screenshot_base64 as string;
         const urlCaptcha = args.url_vaga as string;
 
-        log('FALHA', `CAPTCHA detectado em: ${urlCaptcha}. Pedindo resolucao MANUAL via Telegram...`);
+        log('FALHA', `CAPTCHA detectado em: ${chaveVaga(urlCaptcha)}. Pedindo resolucao MANUAL via Telegram...`);
 
         try {
           const status = await solicitarResolucaoCaptcha(screenshotB64, urlCaptcha);

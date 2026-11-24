@@ -50,7 +50,7 @@ describe('executor — guard de score (gate deterministico)', () => {
 
   it('registra candidatura com score igual/acima do minimo', async () => {
     // Cenário
-    const executar = criarExecutorDeTools(perfilFake(), configFake({ scoreMinimo: 6 }));
+    const executar = criarExecutorDeTools(perfilFake(), configFake({ scoreMinimo: 6, dryRun: false }));
 
     // Ação
     const resp = await executar('registrar_candidatura', {
@@ -69,11 +69,15 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
     const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: true }));
 
     // Ação
-    const resp = await executar('confirmar_envio', { url_vaga: 'https://x/dry', acao: 'enviar candidatura' });
+    const resp = await executar('confirmar_envio', {
+      url_vaga: 'https://x/dry', acao: 'enviar candidatura',
+      plataforma: 'Gupy', titulo_vaga: 'Dev Dry', empresa: 'ACME', score: 8,
+    });
 
     // Validação: bloqueio explícito
+    const dados = JSON.parse(resp) as { permitido: boolean; registrado?: boolean };
+    expect(dados.permitido).toBe(false);
     expect(resp).toMatch(/DRY-RUN|bloqueado/i);
-    expect(resp).not.toMatch(/PODE_ENVIAR/);
   });
 
   it('em producao, confirmar_envio LIBERA o envio', async () => {
@@ -81,23 +85,31 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
     const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false }));
 
     // Ação
-    const resp = await executar('confirmar_envio', { url_vaga: 'https://x/prod', acao: 'enviar candidatura' });
+    const resp = await executar('confirmar_envio', {
+      url_vaga: 'https://x/prod', acao: 'enviar candidatura',
+      plataforma: 'Gupy', titulo_vaga: 'Dev Prod', empresa: 'ACME', score: 8,
+    });
 
     // Validação
-    expect(resp).toMatch(/PODE_ENVIAR|liberado/i);
+    expect((JSON.parse(resp) as { permitido: boolean }).permitido).toBe(true);
   });
 
   it('em producao, confirmar_envio BLOQUEIA vaga já cadastrada', async () => {
-    // A candidatura https://x/ok foi registrada no teste anterior.
+    const registrar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false }));
+    await registrar('registrar_candidatura', {
+      plataforma: 'Gupy', titulo_vaga: 'Dev Ja Aplicado', empresa: 'ACME',
+      url: 'https://x/ok', score: 8,
+    });
     const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false }));
 
     const resp = await executar('confirmar_envio', {
       url_vaga: 'https://x/ok',
       acao: 'enviar candidatura',
+      plataforma: 'Gupy', titulo_vaga: 'Dev', empresa: 'ACME', score: 8,
     });
 
     expect(resp).toMatch(/JA_APLICOU|já possui candidatura/i);
-    expect(resp).not.toMatch(/PODE_ENVIAR/);
+    expect((JSON.parse(resp) as { permitido: boolean }).permitido).toBe(false);
   });
 
   it('bloqueia envio ao atingir o teto por execucao', async () => {
@@ -105,13 +117,21 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
     const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false, maxPorExecucao: 2 }));
 
     // Ação: três tentativas de envio
-    const r1 = await executar('confirmar_envio', { url_vaga: 'https://x/e1' });
-    const r2 = await executar('confirmar_envio', { url_vaga: 'https://x/e2' });
-    const r3 = await executar('confirmar_envio', { url_vaga: 'https://x/e3' });
+    const dados = (n: number) => ({
+      url_vaga: `https://x/e${n}`,
+      plataforma: 'Gupy',
+      titulo_vaga: `Vaga ${n}`,
+      empresa: `Empresa ${n}`,
+      score: 9,
+    });
+    const r1 = await executar('confirmar_envio', dados(1));
+    const r2 = await executar('confirmar_envio', dados(2));
+    const r3 = await executar('confirmar_envio', dados(3));
 
     // Validação: as duas primeiras liberam, a terceira é barrada pelo teto
-    expect(r1).toMatch(/PODE_ENVIAR/);
-    expect(r2).toMatch(/PODE_ENVIAR/);
+    expect((JSON.parse(r1) as { permitido: boolean }).permitido).toBe(true);
+    expect((JSON.parse(r2) as { permitido: boolean }).permitido).toBe(true);
+    expect((JSON.parse(r3) as { permitido: boolean }).permitido).toBe(false);
     expect(r3).toMatch(/TETO_POR_EXECUCAO/);
   });
 });
@@ -121,7 +141,7 @@ describe('dominioDe — domínio registrável', () => {
     // Cenário + Ação + Validação
     expect(dominioDe('https://portal.gupy.io/job/123')).toBe('gupy.io');
     expect(dominioDe('https://empresa.gupy.io/job/9')).toBe('gupy.io');
-    expect(dominioDe('https://www.vagas.com.br/vaga/1')).toBe('vagas.com.br');
+    expect(dominioDe('https://www.catho.com.br/vaga/1')).toBe('catho.com.br');
     expect(dominioDe('https://br.indeed.com/x')).toBe('indeed.com');
     expect(dominioDe('https://linkedin.com/jobs')).toBe('linkedin.com');
   });
