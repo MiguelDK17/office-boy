@@ -12,6 +12,7 @@ import {
   salvarSites,
 } from "../lib/api";
 import type { Configuracao } from "../lib/types";
+import type { ResultadoSalvarEnv } from "../lib/api";
 
 export interface UseConfig {
   config: Configuracao | null;
@@ -23,7 +24,7 @@ export interface UseConfig {
   salvarRespostas: (respostas: Record<string, unknown>) => Promise<string | null>;
   salvarSites: (sites: { sites: unknown }) => Promise<string | null>;
   salvarCurriculos: (curriculos: unknown) => Promise<string | null>;
-  salvarEnv: (valores: Record<string, string>) => Promise<string | null>;
+  salvarEnv: (valores: Record<string, string>) => Promise<ResultadoSalvarEnv>;
 }
 
 export function useConfig(ativo: boolean): UseConfig {

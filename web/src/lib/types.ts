@@ -29,7 +29,7 @@ export interface ExperienciaPerfil {
 export interface Configuracao {
   perfil: Record<string, unknown>;
   respostas: Record<string, unknown>;
-  sites: { sites: Array<{ nome: string; tipo: string; instrucoes: string; urls_busca: string[]; ativo: boolean }> };
+  sites: { sites: SiteConfig[] };
   curriculos: {
     fallback?: Record<string, string>;
     curriculos?: Array<{ id: string; arquivo: string; foco: string; usar_quando: string }>;
@@ -40,6 +40,8 @@ export interface Configuracao {
 }
 
 export interface SiteConfig {
+  /** UUID gerado pelo backend e persistido no sites.json. */
+  id: string;
   nome: string;
   tipo: "portal_vagas" | "linkedin" | "empresa_direta" | string;
   instrucoes: string;

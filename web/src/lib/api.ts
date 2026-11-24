@@ -21,11 +21,55 @@ export async function carregarConfiguracao(): Promise<Configuracao> {
   return (await resp.json()) as Configuracao;
 }
 
+let tokenPromise: Promise<string | null> | null = null;
+
+/**
+ * Token de escrita quando DASHBOARD_TOKEN está definido. O backend só entrega
+ * o valor a Host/Origin locais; sem token definido devolve null e nada muda.
+ */
+function tokenConfig(): Promise<string | null> {
+  if (!tokenPromise) {
+    tokenPromise = fetch("/api/config/session")
+      .then((r) => (r.ok ? r.json() : { token: null }))
+      .then((d: { token?: string | null }) => d.token ?? null)
+      .catch(() => null);
+  }
+  return tokenPromise;
+}
+
+/** O token pode mudar no .env (inclusive no auto-restart) — limpa o cache. */
+export function invalidateTokenConfig(): void {
+  tokenPromise = null;
+}
+
+async function cabecalhosEscrita(): Promise<Record<string, string>> {
+  const token = await tokenConfig();
+  return token
+    ? { "Content-Type": "application/json", "X-Config-Token": token }
+    : { "Content-Type": "application/json" };
+}
+
+/**
+ * Escrita com retry único se o token cacheado ficou velho (troca de
+ * DASHBOARD_TOKEN pela UI ou por outra aba). Sem isso a UI ficaria presa em
+ * 403 até um F5 manual.
+ */
+async function fetchEscrita(url: string, init: RequestInit): Promise<Response> {
+  let resp = await fetch(url, { ...init, headers: await cabecalhosEscrita() });
+  if (resp.status === 403) {
+    const dados = (await resp.clone().json().catch(() => ({}))) as { mensagem?: string };
+    if (dados.mensagem?.includes("X-Config-Token")) {
+      invalidateTokenConfig();
+      resp = await fetch(url, { ...init, headers: await cabecalhosEscrita() });
+    }
+  }
+  return resp;
+}
+
 /** PUT genérico das rotas de config. Retorna mensagem de erro do backend ou null. */
 async function salvarConfig(rota: string, corpo: unknown): Promise<string | null> {
-  const resp = await fetch(`/api/config/${rota}`, {
+  const resp = await fetchEscrita(`/api/config/${rota}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(corpo),
   });
   const dados = (await resp.json().catch(() => ({}))) as { mensagem?: string };
@@ -36,7 +80,102 @@ export const salvarPerfil = (perfil: Record<string, unknown>) => salvarConfig("p
 export const salvarRespostas = (respostas: Record<string, unknown>) => salvarConfig("respostas", respostas);
 export const salvarSites = (sites: { sites: unknown }) => salvarConfig("sites", sites);
 export const salvarCurriculos = (curriculos: unknown) => salvarConfig("curriculos", curriculos);
-export const salvarEnv = (valores: Record<string, string>) => salvarConfig("env", { valores });
+
+export type MotivoSemReinicio = "rodando" | "sem-supervisor" | "sem-control-mode" | null;
+
+export interface ResultadoSalvarEnv {
+  erro: string | null;
+  /** true = o backend vai reiniciar o container sozinho (bot parado). */
+  reiniciando: boolean;
+  /** Por que não reiniciou (quando reiniciando = false). */
+  motivo: MotivoSemReinicio;
+  /** Mensagem pronta do backend, para o banner. */
+  mensagem: string;
+  /** Boot id do processo que respondeu — a UI espera ele mudar. */
+  bootId: string | null;
+}
+
+export async function salvarEnv(valores: Record<string, string>): Promise<ResultadoSalvarEnv> {
+  const resp = await fetchEscrita("/api/config/env", {
+    method: "PUT",
+    body: JSON.stringify({ valores }),
+  });
+  const dados = (await resp.json().catch(() => ({}))) as {
+    mensagem?: string;
+    reiniciando?: boolean;
+    motivo?: MotivoSemReinicio;
+    bootId?: string;
+  };
+  if (!resp.ok) {
+    return {
+      erro: dados.mensagem ?? `Falha ao salvar env (${resp.status})`,
+      reiniciando: false,
+      motivo: null,
+      mensagem: "",
+      bootId: null,
+    };
+  }
+  return {
+    erro: null,
+    reiniciando: Boolean(dados.reiniciando),
+    motivo: dados.motivo ?? null,
+    mensagem: dados.mensagem ?? "",
+    bootId: dados.bootId ?? null,
+  };
+}
+
+/** Erro de validação devolvido pelo backend por URL inválida (índice na lista). */
+export interface ErroValidacaoUrl {
+  indice: number;
+  motivo: string;
+}
+
+export interface ResultadoSitesApi {
+  /** null = sucesso; texto = mensagem pronta para exibir. */
+  erro: string | null;
+  erros?: ErroValidacaoUrl[];
+  urls?: string[];
+  aplicadoNaProximaRun?: boolean;
+}
+
+/** PUT /api/sites/:id/urls — grava SÓ as URLs do site (lista completa). */
+export async function salvarUrlsSite(id: string, urls: string[]): Promise<ResultadoSitesApi> {
+  const resp = await fetchEscrita(`/api/sites/${encodeURIComponent(id)}/urls`, {
+    method: "PUT",
+    body: JSON.stringify({ urls }),
+  });
+  const dados = (await resp.json().catch(() => ({}))) as {
+    mensagem?: string;
+    urls?: string[];
+    aplicadoNaProximaRun?: boolean;
+    erros?: ErroValidacaoUrl[];
+  };
+  if (!resp.ok) {
+    return {
+      erro: dados.mensagem ?? `Falha ao salvar URLs (${resp.status})`,
+      erros: dados.erros,
+    };
+  }
+  return {
+    erro: null,
+    urls: dados.urls ?? urls,
+    aplicadoNaProximaRun: Boolean(dados.aplicadoNaProximaRun),
+  };
+}
+
+/** PATCH /api/sites/:id/ativo — liga/desliga o site na hora, sem a barra Salvar. */
+export async function alterarSiteAtivo(id: string, ativo: boolean): Promise<ResultadoSitesApi> {
+  const resp = await fetchEscrita(`/api/sites/${encodeURIComponent(id)}/ativo`, {
+    method: "PATCH",
+    body: JSON.stringify({ ativo }),
+  });
+  const dados = (await resp.json().catch(() => ({}))) as {
+    mensagem?: string;
+    aplicadoNaProximaRun?: boolean;
+  };
+  if (!resp.ok) return { erro: dados.mensagem ?? `Falha ao alterar o site (${resp.status})` };
+  return { erro: null, aplicadoNaProximaRun: Boolean(dados.aplicadoNaProximaRun) };
+}
 
 /** Modelo do catálogo OpenRouter (GET /api/config/modelos). */
 export interface ModeloCatalogo {

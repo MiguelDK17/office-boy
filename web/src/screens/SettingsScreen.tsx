@@ -10,9 +10,10 @@
 //
 // Save de .env exige REINICIALIZAÇÃO (dotenv lê uma vez só) — banner amarelo.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CampoEnv, Configuracao, SiteConfig } from "../lib/types";
 import type { UseConfig } from "../hooks/useConfig";
+import { alterarSiteAtivo, invalidateTokenConfig, type MotivoSemReinicio } from "../lib/api";
 import {
   ActionBar,
   Field,
@@ -24,6 +25,7 @@ import {
   SelectField,
   Toggle,
 } from "../components/form";
+import { SiteUrlsDialog } from "../components/SiteUrlsDialog";
 
 type Valores = Record<string, string | number | boolean | null>;
 
@@ -94,25 +96,96 @@ export function SettingsScreen({
   const [saved, setSaved] = useState(false);
   const [erroSalvar, setErroSalvar] = useState<string | null>(null);
   const [restartNeeded, setRestartNeeded] = useState(false);
+  // true = o backend já gravou e vai reiniciar o container sozinho.
+  const [reiniciando, setReiniciando] = useState(false);
+  const [bootIdEsperado, setBootIdEsperado] = useState<string | null>(null);
+  const [motivoReinicio, setMotivoReinicio] = useState<MotivoSemReinicio>(null);
+  const [mensagemReinicio, setMensagemReinicio] = useState("");
+  // Incrementado pelo botão "Tentar novamente" após timeout do polling.
+  const [tentativaReinicio, setTentativaReinicio] = useState(0);
+  // O dialog guarda o ID (não o objeto): o estado do site pode mudar enquanto
+  // ele está aberto (ex.: toggle) sem o dialog ficar com uma cópia velha.
+  const [siteUrlsOpen, setSiteUrlsOpen] = useState<string | null>(null);
+  const [salvandoSiteId, setSalvandoSiteId] = useState<string | null>(null);
+  const [siteAviso, setSiteAviso] = useState<{ tipo: "erro" | "ok"; texto: string } | null>(null);
+  // Última versão PERSISTIDA dos sites (inclui gravações diretas do dialog e
+  // do toggle). O "Descartar" e o cálculo de dirty usam esta base, não o
+  // cfg.config — que fica velho depois de um save direto.
+  const sitesBase = useRef<SiteConfig[]>([]);
+  // Referência ao ÚLTIMO config já hidratado. Evita reidratar com cfg.config
+  // obsoleto quando restartNeeded muda (antes do recarregar da página).
+  const ultimoConfigRef = useRef<Configuracao | null>(null);
 
   // Hidrata a partir do config real; rehidrata no Descartar/Recarregar.
   useEffect(() => {
     const config = cfg.config;
-    if (!config) return;
+    if (!config || ultimoConfigRef.current === config) return;
+    ultimoConfigRef.current = config;
+    const lista = config.sites.sites.map((s) => ({ ...s }));
+    sitesBase.current = lista.map((s) => ({ ...s }));
     // Com restart pendente, o process.env ainda tem os valores ANTIGOS —
     // rehidratar faria o campo "reverter" logo após o save bem-sucedido
     // (parece que a alteração foi descartada). Os valores locais ficam.
     if (restartNeeded) {
-      setSiteStates(config.sites.sites.map((s) => ({ ...s })));
+      setSiteStates(lista);
       return;
     }
     setValores(Object.fromEntries(config.env.map((campo) => [campo.chave, inicial(campo)])));
-    setSiteStates(config.sites.sites.map((s) => ({ ...s })));
+    setSiteStates(lista);
     setDirty(false);
   }, [cfg.config, restartNeeded]);
 
+  const recarregarConfig = cfg.recarregar;
+
+  // Após o auto-restart, espera o PROCESSO NOVO (bootId diferente) e recarrega.
+  useEffect(() => {
+    if (!reiniciando) return;
+    let cancelado = false;
+    let timer = 0;
+    let tentativas = 0;
+    const inicio = Date.now();
+    const verificar = async () => {
+      try {
+        const resp = await fetch("/api/status", { cache: "no-store" });
+        if (resp.ok) {
+          const dados = (await resp.json().catch(() => ({}))) as { bootId?: string };
+          if (dados.bootId && bootIdEsperado && dados.bootId !== bootIdEsperado) {
+            if (cancelado) return;
+            invalidateTokenConfig(); // DASHBOARD_TOKEN pode ter mudado no restart
+            setReiniciando(false);
+            setRestartNeeded(false);
+            setErroSalvar(null);
+            setBootIdEsperado(null);
+            await recarregarConfig();
+            return;
+          }
+        }
+      } catch {
+        // backend ainda subindo — tenta de novo
+      }
+      if (cancelado) return;
+      if (Date.now() - inicio > 180_000) {
+        setReiniciando(false);
+        setErroSalvar("O container ainda não voltou. Tente novamente ou recarregue a página.");
+        setDirty(true);
+        return;
+      }
+      tentativas++;
+      const espera = tentativas < 4 ? 1500 : tentativas < 8 ? 3000 : 5000;
+      timer = window.setTimeout(() => void verificar(), espera);
+    };
+    timer = window.setTimeout(() => void verificar(), 2500);
+    return () => {
+      cancelado = true;
+      window.clearTimeout(timer);
+    };
+  }, [reiniciando, bootIdEsperado, recarregarConfig, tentativaReinicio]);
+
   const env = cfg.config?.env ?? [];
   const envDisponivel = cfg.config?.envDisponivel ?? false;
+  const siteAberto = siteUrlsOpen
+    ? siteStates.find((site) => site.id === siteUrlsOpen) ?? null
+    : null;
 
   const porGrupo = useMemo(() => {
     const mapa = new Map<string, CampoEnv[]>();
@@ -139,6 +212,42 @@ export function SettingsScreen({
     setValores((atual) => ({ ...atual, [campo.chave]: valor }));
     if (valor !== "") marcarDirty();
   };
+
+  /**
+   * Toggle do site grava na hora (PATCH por id), independente da barraSalvar.
+   * Atualização otimista + rollback se o backend recusar.
+   */
+  async function alternarSite(site: SiteConfig, ativo: boolean) {
+    if (!site.id || salvandoSiteId) return;
+    const anterior = site.ativo;
+    const aplicar = (valor: boolean) => {
+      setSiteStates((atual) =>
+        atual.map((s) => (s.id === site.id ? { ...s, ativo: valor } : s)),
+      );
+      sitesBase.current = sitesBase.current.map((s) =>
+        s.id === site.id ? { ...s, ativo: valor } : s,
+      );
+    };
+
+    aplicar(ativo);
+    setSalvandoSiteId(site.id);
+    setSiteAviso(null);
+    const resultado = await alterarSiteAtivo(site.id, ativo);
+    setSalvandoSiteId(null);
+
+    if (resultado.erro) {
+      aplicar(anterior);
+      setSiteAviso({ tipo: "erro", texto: resultado.erro });
+      return;
+    }
+    setSiteAviso({
+      tipo: "ok",
+      texto: `${site.nome} ${ativo ? "ativado" : "desativado"}${
+        resultado.aplicadoNaProximaRun ? " — vale na próxima execução" : ""
+      }`,
+    });
+    window.setTimeout(() => setSiteAviso(null), 4000);
+  }
 
   async function salvar() {
     setSalvando(true);
@@ -169,32 +278,49 @@ export function SettingsScreen({
         campo.tipo === "booleano" ? (valor ? "true" : "false") : String(valor);
       mudouEnv = true;
     }
+    // 1) sites.json PRIMEIRO — o env vai por último porque pode reiniciar o
+    // processo e interromper qualquer escrita que ainda esteja em voo.
+    const sitesMudou = JSON.stringify(siteStates) !== JSON.stringify(sitesBase.current);
+    const erroSites = sitesMudou ? await cfg.salvarSites({ sites: siteStates }) : null;
+
     let erroEnv: string | null = null;
-    if (mudouEnv) {
+    let vaiReiniciar = false;
+    if (erroSites) {
+      // Não grava o .env nem reinicia deixando alterações de sites perdidas.
+      erroEnv = `${erroSites} (o .env não foi alterado)`;
+    } else if (mudouEnv) {
       if (!envDisponivel) {
         erroEnv = "Sem arquivo .env neste ambiente — edite o .env do host e reinicie o container.";
       } else {
-        erroEnv = await cfg.salvarEnv(envPayload);
-        if (!erroEnv) setRestartNeeded(true);
+        const resultadoEnv = await cfg.salvarEnv(envPayload);
+        erroEnv = resultadoEnv.erro;
+        if (!erroEnv) {
+          if (resultadoEnv.reiniciando) {
+            vaiReiniciar = true;
+            setBootIdEsperado(resultadoEnv.bootId);
+            setReiniciando(true);
+          } else {
+            setRestartNeeded(true);
+            setMotivoReinicio(resultadoEnv.motivo);
+            setMensagemReinicio(resultadoEnv.mensagem);
+          }
+        }
       }
     }
 
-    // 2) sites.json — só faz PUT se algo mudou de verdade (toggle/instruções)
-    const sitesOriginais = cfg.config?.sites.sites ?? [];
-    const sitesMudou = JSON.stringify(siteStates) !== JSON.stringify(sitesOriginais);
-    const erroSites = sitesMudou ? await cfg.salvarSites({ sites: siteStates }) : null;
-
     setSalvando(false);
-    const erro = erroEnv ?? erroSites;
+    const erro = erroEnv;
     if (erro) {
       setErroSalvar(erro);
       setDirty(true);
       return;
     }
+    sitesBase.current = siteStates.map((s) => ({ ...s }));
     setDirty(false);
     setSaved(true);
     window.setTimeout(() => setSaved(false), 3000);
-    await cfg.recarregar();
+    // Durante o restart o backend cai; o polling abaixo recarrega ao voltar.
+    if (!vaiReiniciar) await cfg.recarregar();
   }
 
   const campo = (chave: string): CampoEnv | undefined =>
@@ -254,8 +380,8 @@ export function SettingsScreen({
     if (c.tipo === "booleano") return renderBooleano(c, hint ?? "Ativar");
     return renderTexto(c, hint);
   };
-  const renderBooleano = (c: CampoEnv) => {
-    const r = ROTULOS_TOGGLE[c.chave] ?? { label: c.chave, descricao: "" };
+  const renderBooleano = (c: CampoEnv, rotuloPadrao = "Ativar") => {
+    const r = ROTULOS_TOGGLE[c.chave] ?? { label: rotuloPadrao, descricao: "" };
     return (
       <div className="toggle-field" key={c.chave}>
         <span>
@@ -267,6 +393,7 @@ export function SettingsScreen({
         <Toggle
           checked={valores[c.chave] === true}
           disabled={c.somenteLeitura}
+          ariaLabel={r.label}
           onChange={(checked) => setCampo(c, checked)}
         />
       </div>
@@ -301,23 +428,57 @@ export function SettingsScreen({
         description="Ajuste como o bot trabalha. As mudanças valem a partir da próxima vez que você iniciar o bot."
       />
 
-      {restartNeeded && (
+      {reiniciando && (
+        <div className="restart-banner is-restarting" role="status" aria-live="polite">
+          <span className="restart-mark restart-spinner" aria-hidden="true" />
+          <div>
+            <strong>Reiniciando automaticamente…</strong>
+            <p>
+              Configurações salvas. O container está sendo recriado e esta tela volta sozinha em
+              alguns segundos — não feche a página.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {!reiniciando && restartNeeded && (
         <div className="restart-banner">
           <span className="restart-mark">!</span>
           <div>
-            <strong>Reinicialização necessária</strong>
+            <strong>Reinicialização pendente</strong>
             <p>
-              O .env só é lido na inicialização. Parar o bot e iniciá-lo de novo aplica os novos
-              valores.
+              {mensagemReinicio ||
+                "O .env só é lido na inicialização. Reinicie manualmente para aplicar."}
             </p>
+          </div>
+          {motivoReinicio === "rodando" && (
+            <button
+              onClick={() => {
+                setRestartNeeded(false);
+                onReiniciarBot();
+              }}
+            >
+              Ir para a Run
+            </button>
+          )}
+        </div>
+      )}
+
+      {!reiniciando && !!erroSalvar && erroSalvar.includes("ainda não voltou") && (
+        <div className="restart-banner" role="alert">
+          <span className="restart-mark">!</span>
+          <div>
+            <strong>Reinício em dúvida</strong>
+            <p>{erroSalvar}</p>
           </div>
           <button
             onClick={() => {
-              setRestartNeeded(false);
-              onReiniciarBot();
+              setErroSalvar(null);
+              setReiniciando(true);
+              setTentativaReinicio((n) => n + 1);
             }}
           >
-            Ir para a Run
+            Tentar novamente
           </button>
         </div>
       )}
@@ -420,34 +581,70 @@ export function SettingsScreen({
           className="full-card"
         >
           <div className="sites-list">
-            {siteStates.map((site, index) => (
-              // nome pode se repetir em teoria — index garante key única
-              <div className="site-row" key={`${site.nome}-${index}`}>
+            {siteStates.map((site) => (
+              <div className="site-row" key={site.id}>
                 <div className="site-logo">{site.nome.charAt(0)}</div>
                 <div className="site-copy">
                   <strong>{site.nome}</strong>
                   <span>{site.instrucoes}</span>
-                  <small>
-                    {site.tipo} · {site.urls_busca.length} URL(s) de busca
-                  </small>
+                  <button
+                    type="button"
+                    className="site-url-count"
+                    onClick={() => setSiteUrlsOpen(site.id)}
+                    aria-label={`Gerenciar URLs de busca de ${site.nome}`}
+                  >
+                    {site.urls_busca.length > 0
+                      ? `${site.urls_busca.length} ${site.urls_busca.length === 1 ? "URL" : "URLs"} de busca`
+                      : "Adicionar URLs"}
+                  </button>
+                  {site.ativo && site.urls_busca.length === 0 && (
+                    <small className="site-warning">
+                      <Glyph name="alert" size={13} /> Sem URLs, este site não buscará vagas.
+                    </small>
+                  )}
                 </div>
-                <Toggle
-                  checked={site.ativo}
-                  onChange={(checked) => {
-                    setSiteStates((atual) =>
-                      atual.map((s, i) => (i === index ? { ...s, ativo: checked } : s)),
-                    );
-                    marcarDirty();
-                  }}
-                />
+                <div className="site-actions">
+                  <button
+                    type="button"
+                    className="icon-button site-manage-button"
+                    title="Gerenciar URLs"
+                    aria-label={`Gerenciar URLs de ${site.nome}`}
+                    onClick={() => setSiteUrlsOpen(site.id)}
+                  >
+                    <Glyph name="list-edit" size={16} />
+                  </button>
+                  <Toggle
+                    checked={site.ativo}
+                    disabled={salvandoSiteId === site.id}
+                    ariaLabel={`Ativar ${site.nome}`}
+                    onChange={(checked) => void alternarSite(site, checked)}
+                  />
+                </div>
               </div>
             ))}
           </div>
-          <p className="field-hint" style={{ marginTop: 10 }}>
-            As instruções e URLs de busca ficam fora da interface para evitar alterações acidentais
-            nas configurações dos portais.
-          </p>
+          {siteAviso && (
+            <div
+              className={`site-action-feedback ${siteAviso.tipo === "erro" ? "is-error" : "is-ok"}`}
+              role={siteAviso.tipo === "erro" ? "alert" : "status"}
+            >
+              {siteAviso.texto}
+            </div>
+          )}
         </FormCard>
+
+        <SiteUrlsDialog
+          site={siteAberto}
+          onSaved={(siteId, urls) => {
+            setSiteStates((atual) =>
+              atual.map((s) => (s.id === siteId ? { ...s, urls_busca: urls } : s)),
+            );
+            sitesBase.current = sitesBase.current.map((s) =>
+              s.id === siteId ? { ...s, urls_busca: urls } : s,
+            );
+          }}
+          onClose={() => setSiteUrlsOpen(null)}
+        />
       </div>
 
       <ActionBar
@@ -457,11 +654,13 @@ export function SettingsScreen({
         saveLabel={salvando ? "Salvando..." : "Salvar configurações"}
         onSave={salvar}
         onDiscard={() => {
-          const config: Configuracao | null = cfg.config;
+          const config = cfg.config;
           if (config) {
             setValores(Object.fromEntries(config.env.map((c) => [c.chave, inicial(c)])));
-            setSiteStates(config.sites.sites.map((s) => ({ ...s })));
           }
+          // Restaura a última versão PERSISTIDA dos sites (não o GET antigo):
+          // toggles/URLs salvos direto pelo card continuam valendo.
+          setSiteStates(sitesBase.current.map((s) => ({ ...s })));
           setDirty(false);
           setErroSalvar(null);
         }}

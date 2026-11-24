@@ -5,7 +5,19 @@
 import { useEffect, useRef, useState } from "react";
 import { carregarModelos, type ModeloCatalogo } from "../lib/api";
 
-export type GlyphName = "check" | "eye" | "file" | "lock" | "upload";
+export type GlyphName =
+  | "check"
+  | "eye"
+  | "file"
+  | "lock"
+  | "upload"
+  | "list-edit"
+  | "external"
+  | "edit"
+  | "trash"
+  | "plus"
+  | "close"
+  | "alert";
 
 const glyphPaths: Record<GlyphName, React.ReactNode> = {
   check: <path d="m5 12 4 4L19 6" />,
@@ -31,6 +43,37 @@ const glyphPaths: Record<GlyphName, React.ReactNode> = {
     <>
       <path d="M12 16V4m-4 4 4-4 4 4" />
       <path d="M4 15v5h16v-5" />
+    </>
+  ),
+  "list-edit": (
+    <>
+      <path d="M5 6h8M5 12h6M5 18h6" />
+      <path d="m15 15 4-4 2 2-4 4-3 1 1-3Z" />
+    </>
+  ),
+  external: (
+    <>
+      <path d="M14 5h5v5M19 5l-8 8" />
+      <path d="M19 14v4.5A1.5 1.5 0 0 1 17.5 20h-12A1.5 1.5 0 0 1 4 18.5v-12A1.5 1.5 0 0 1 5.5 5H10" />
+    </>
+  ),
+  edit: (
+    <>
+      <path d="m4 16-.8 4.8L8 20l10.8-10.8a2.1 2.1 0 0 0-3-3L4 16Z" />
+      <path d="m14.5 7.5 2 2" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M4 7h16M10 11v5M14 11v5M6 7l1 13h10l1-13M9 7V4h6v3" />
+    </>
+  ),
+  plus: <path d="M12 5v14M5 12h14" />,
+  close: <path d="m6 6 12 12M18 6 6 18" />,
+  alert: (
+    <>
+      <path d="M12 4 21 20H3L12 4Z" />
+      <path d="M12 9v5M12 17h.01" />
     </>
   ),
 };
@@ -259,16 +302,20 @@ export function Toggle({
   checked,
   disabled,
   onChange,
+  ariaLabel,
 }: {
   checked: boolean;
   disabled?: boolean;
   onChange: (checked: boolean) => void;
+  /** Nome acessível — obrigatório quando não há label visível associado. */
+  ariaLabel?: string;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
       disabled={disabled}
       className={`setting-toggle ${checked ? "setting-toggle-on" : ""}`}
       onClick={() => onChange(!checked)}
