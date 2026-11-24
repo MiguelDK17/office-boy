@@ -43,7 +43,7 @@ describe('pausa real — contrato', () => {
     // Cenário + Ação + Validação: o guard de login pausa o run (processo vivo)
     expect(agente).toContain('config.pausarEmLogin');
     expect(agente).toContain('solicitarPausaAgente();');
-    expect(agente).toContain('PAGINA DE LOGIN detectada');
+    expect(agente).toContain('LOGIN exigido detectado');
     expect(agente).toContain('Faca login no Chrome do bot e clique Retomar');
     expect(agente).toMatch(/enviarTelegram\(/);
   });

@@ -398,8 +398,8 @@ const PADRAO_ERRO_SELETOR =
 // Página de login + extração de texto MCP: movidos para src/sessao.ts
 // (módulo de sessão — guard com verificação + health check pré-run).
 // Re-exportados aqui para manter os imports existentes (e testes) funcionando.
-export { ehPaginaDeLogin, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js';
-import { ehPaginaDeLogin, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js';
+export { ehPaginaDeLogin, exigeLoginParaCandidatar, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js';
+import { ehPaginaDeLogin, exigeLoginParaCandidatar, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js';
 
 /**
  * Detecta se o resultado de uma tool indica falha de seletor/CSS ou elemento
@@ -766,7 +766,23 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
         // pede o teste: re-navegar a URL alvo; só reporta `sessao_expirada`
         // se cair no login DE NOVO. A partir de 3 páginas de login seguidas,
         // a sessão é considerada quebrada e o aviso manda pular direto.
-        if (ehPaginaDeLogin(resultado)) {
+        // Site inferido da última URL navegada para o detector de login
+        // "silencioso" (Catho/Indeed abrem a busca sem login e só exigem conta
+        // ao candidatar-se — ehPaginaDeLogin não pega esse caso).
+        let siteAtual = '';
+        try {
+          const host = new URL(ultimaUrlNavegada ?? 'http://localhost').hostname.toLowerCase();
+          const candidato = sitesAtivos.find(s =>
+            s.urls_busca.some(u => {
+              try { return new URL(u).hostname.toLowerCase() === host; } catch { return false; }
+            }),
+          );
+          siteAtual = candidato?.nome ?? host;
+        } catch { /* sem URL navegada ainda */ }
+
+        const loginDetectado = ehPaginaDeLogin(resultado)
+          || exigeLoginParaCandidatar(siteAtual, resultado);
+        if (loginDetectado) {
           paginasLogin++;
           resultado += construirAvisoVerificacaoLogin(ultimaUrlNavegada, paginasLogin);
 
@@ -778,7 +794,7 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
           // clica "Retomar" — a sessão volta e o run continua de onde parou.
           if (config.pausarEmLogin) {
             solicitarPausaAgente();
-            log('AGENTE', 'PAGINA DE LOGIN detectada — pausando o run automaticamente. Faca login no Chrome do bot e clique Retomar.');
+            log('AGENTE', 'LOGIN exigido detectado — pausando o run automaticamente. Faca login no Chrome do bot e clique Retomar.');
             await enviarTelegram(
               '🟡 Página de login detectada\n' +
               'O run foi PAUSADO automaticamente (a sessão pode ter expirado).\n' +

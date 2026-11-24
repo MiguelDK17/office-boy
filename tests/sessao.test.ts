@@ -58,7 +58,7 @@ describe('módulo de sessão — contrato', () => {
 
   it('agente.ts reexporta as funções movidas (compatibilidade de imports/testes)', () => {
     // Cenário + Ação + Validação
-    expect(agente).toContain("export { ehPaginaDeLogin, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js'");
+    expect(agente).toContain("export { ehPaginaDeLogin, exigeLoginParaCandidatar, extrairTextoMcp, construirAvisoVerificacaoLogin } from './sessao.js'");
   });
 });
 
@@ -88,6 +88,13 @@ describe('sessão anônima em portais que abrem a busca sem login', () => {
     expect(agente).toMatch(/sitesBloqueados: string\[\] = \[\]/);
     expect(agente).toMatch(/s\.ativo && !bloqueados\.has\(s\.nome\.toLowerCase\(\)\)/);
     expect(index).toMatch(/sessoes\.filter\(s => s\.status === 'login_exigido'\)\.map\(s => s\.site\)/);
+  });
+
+  it('qualquer página de login detectada no meio da run pausa o bot (não só URL /login)', () => {
+    expect(agente).toMatch(/const loginDetectado = ehPaginaDeLogin\(resultado\)\s*\|\| exigeLoginParaCandidatar\(siteAtual, resultado\)/);
+    expect(agente).toMatch(/if \(loginDetectado\) \{/);
+    expect(agente).toMatch(/config\.pausarEmLogin/);
+    expect(agente).toMatch(/solicitarPausaAgente\(\)/);
   });
 
   it('logs de argumentos de tool nunca devolvem algo que pareça URL navegável', () => {
