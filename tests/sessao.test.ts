@@ -2,7 +2,7 @@
 // URL alvo antes de desistir) e health check pré-run dos sites configurados.
 
 import { describe, it, expect } from 'vitest';
-import { exigeLoginParaCandidatar } from '../src/sessao';
+import { ehPaginaDeLogin, exigeLoginParaCandidatar } from '../src/sessao';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -13,6 +13,15 @@ const agente = readFileSync(path.resolve(__dirname, '..', 'src', 'agente.ts'), '
 const index = readFileSync(path.resolve(__dirname, '..', 'src', 'index.ts'), 'utf-8');
 
 describe('módulo de sessão — contrato', () => {
+
+  it('detecta página de cadastro da Catho pelo marcador Cadastre-se', () => {
+    const pagina = [
+      'Page URL: https://www.catho.com.br/cadastro-candidato',
+      'Page Title: Cadastre-se na Catho',
+      'Cadastre-se para criar sua conta e continuar.',
+    ].join('\n');
+    expect(ehPaginaDeLogin(pagina)).toBe(true);
+  });
 
   it('o guard pede VERIFICAÇÃO da sessão (re-navegar a URL alvo) antes de reportar falha', () => {
     // Cenário + Ação + Validação: o aviso instrui o teste determinístico
@@ -47,6 +56,21 @@ describe('módulo de sessão — contrato', () => {
     expect(sessao).toContain("ehPaginaDeLogin(texto)");
     // Classificação em três estados
     expect(sessao).toContain("'ok' | 'login_exigido' | 'erro'");
+  });
+
+  it('o health check LÊ o conteúdo da página — navigate sozinho não traz o body', () => {
+    // Cenário: browser_navigate devolve apenas "### Page / Page URL / Title".
+    // Sem a leitura via browser_evaluate, o detector de login nunca via texto.
+    expect(sessao).toContain('export async function lerPaginaAtual');
+    expect(sessao).toContain("name: 'browser_evaluate'");
+    expect(sessao).toContain('montarScriptLerPagina');
+    expect(sessao).toMatch(/Page URL: \$\{pagina\.url/);
+  });
+
+  it('reconhece redirecionamentos de login/cadastro de Catho e Indeed', () => {
+    // Catho manda para /cadastro-candidato; Indeed para secure.indeed.com/auth
+    expect(sessao).toContain('/cadastro-candidato');
+    expect(sessao).toContain('/auth(?:[/?#]|$)');
   });
 
   it('o index roda o health check ANTES do agente e aborta se TODAS as sessões quebrarem', () => {
@@ -95,6 +119,13 @@ describe('sessão anônima em portais que abrem a busca sem login', () => {
     expect(agente).toMatch(/if \(loginDetectado\) \{/);
     expect(agente).toMatch(/config\.pausarEmLogin/);
     expect(agente).toMatch(/solicitarPausaAgente\(\)/);
+  });
+
+  it('browser_snapshot com filename é interceptado — o conteúdo precisa voltar', () => {
+    // Cenário: na run de 24/11 o modelo pediu filename e ficou cego.
+    expect(agente).toContain("toolName === 'browser_snapshot' && typeof toolArgs.filename === 'string'");
+    expect(agente).toContain('delete toolArgs.filename');
+    expect(agente).toMatch(/snapshot precisa voltar no resultado/);
   });
 
   it('logs de argumentos de tool nunca devolvem algo que pareça URL navegável', () => {

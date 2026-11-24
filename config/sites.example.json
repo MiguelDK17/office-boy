@@ -16,7 +16,7 @@
       "nome": "Catho",
       "tipo": "portal_vagas",
       "ativo": false,
-      "instrucoes": "Na pagina de resultados, clicar em cada vaga para ver detalhes. A Catho exige login para visualizar e se candidatar.",
+      "instrucoes": "Logo apos abrir a busca, use listar_vagas para obter as URLs diretas. A descricao completa abre sem login em /vagas/<slug>/<id>; leia, pontue e navegue direto para a vaga. 'Quero me candidatar' exige conta Catho — o sistema pausa no login automaticamente.",
       "urls_busca": [],
       "id": "acac95d1-1416-4680-a22b-39f35f6b45c6"
     },
@@ -34,7 +34,7 @@
       "nome": "Indeed",
       "tipo": "portal_vagas",
       "ativo": false,
-      "instrucoes": "Buscar vagas com Candidatura simplificada. Preencher formularios.",
+      "instrucoes": "Logo apos abrir a busca, use listar_vagas: os cards sao botoes sem href e a tool devolve URLs /viewjob?jk=... Navegue direto para cada vaga. 'Candidate-se facilmente' = candidatura simplificada; 'Candidatar-se no site da empresa' = abrir o site. Login do Indeed pausa o run automaticamente.",
       "urls_busca": [],
       "id": "25f59185-db59-472a-8146-42a9d81b7d42"
     }

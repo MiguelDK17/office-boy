@@ -92,7 +92,7 @@ O bot navega por portais de vagas (Gupy, Catho, LinkedIn, Indeed), analisa cada 
 ### 2. Instalação
 
 ```bash
-git clone https://github.com/MiguelDK17/officeboy.git
+git clone https://github.com/MiguelDK17/office-boy.git
 cd officeboy
 npm install
 ```
@@ -300,6 +300,16 @@ Seus dados pessoais e profissionais que o agente usa para preencher formulários
 Configure quais sites o bot deve navegar e quais URLs de busca usar. Cada site pode ter múltiplas URLs de busca.
 
 Cada site ganha um `id` (UUID) gerado automaticamente na primeira subida do control server e persistido no arquivo — **não edite esse campo à mão**. As URLs de busca e o liga/desliga são gerenciados na UI, pelo card "Sites de vagas" e pelo dialog "Gerenciar URLs". O bot lê este arquivo no início de **cada run**: alterações feitas durante uma execução só valem na próxima.
+
+#### Suporte dedicado: Catho e Indeed
+
+As listagens desses dois portais são SPAs pesadas: o snapshot de acessibilidade passa de 28–34 mil caracteres (quase tudo filtro/banner) e os cards do Indeed são botões sem `href`. Para o modelo não se perder nem clicar na vaga errada:
+
+- A tool **`listar_vagas`** extrai a listagem atual de forma determinística e devolve `titulo`, `empresa`, `local`, `salario`, status no banco (`nova`/`ja_vista`/`ja_aplicou`/`bloqueada`) e a **URL direta** de cada vaga.
+- O agente navega **direto para a URL da vaga** (Catho: `/vagas/<slug>/<id>`; Indeed: `/viewjob?jk=...`) e só então faz `browser_snapshot` na página da vaga — bem menor e sem refs expiradas.
+- No Indeed, a avaliação pública da empresa é lida na página de detalhe; empresas com nota **menor ou igual a 2,5** são descartadas antes da candidatura. A trava também é aplicada no checkpoint final de envio.
+- O health check de sessão agora lê o **texto real da página** (o `browser_navigate` sozinho não devolve o body), então detecta Catho anônima ("Cadastre-se para ver...") e redirecionamentos de login/cadastro.
+- Página de login/cadastro em **qualquer** portal (inclusive no meio da candidatura) **pausa o run** e avisa no Telegram/UI para você logar no Chrome do bot e clicar RETOMAR.
 
 ### `config/respostas.json` — Respostas Pré-definidas
 

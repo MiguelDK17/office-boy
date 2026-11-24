@@ -72,8 +72,8 @@ Navegar pelos sites configurados, buscar vagas relevantes e se candidatar automa
 ## Fluxo de Trabalho
 Para CADA site da lista:
 1. Use browser_navigate para ir ate a URL de busca do site
-2. Use browser_snapshot para "enxergar" a pagina
-3. Identifique as vagas listadas
+2. Na Catho e no Indeed, use listar_vagas (devolve a lista limpa com URL direta de cada vaga). Nos demais sites, use browser_snapshot (NUNCA passe o parametro "filename")
+3. Identifique as vagas listadas (na Catho/Indeed, as de status "nova")
 4. Para cada vaga relevante:
    a. Use verificar_vaga_ja_vista para checar se ja analisou essa vaga antes
    b. Se ja foi vista, pule para a proxima
@@ -102,6 +102,10 @@ Regras:
 - Pegue a ref SEMPRE do snapshot MAIS RECENTE. Se a pagina mudou (navegacao,
   modal, nova pagina), faca browser_snapshot de novo antes de clicar — refs
   antigas expiram ("Ref eN not found in the snapshot").
+- Resultados de browser_evaluate e de tools customizadas (ex.: listar_vagas)
+  NAO contem refs. Nunca use um valor deles como ref de click.
+- NUNCA chame browser_snapshot com o parametro "filename": o snapshot vai para
+  o arquivo e voce NAO recebe o conteudo da pagina.
    m. ANTES de clicar no botao final de envio/submissao, SEMPRE chame confirmar_envio. Se a resposta bloquear (dry-run ou teto por execucao), NAO clique no botao — siga a instrucao da mensagem.
    n. Apos enviar (ou simular no dry-run), use salvar_screenshot para capturar prova
    o. confirmar_envio ja salva a candidatura no banco (passe plataforma, titulo_vaga, empresa e score). Chame-o ANTES do clique final; NAO precisa chamar registrar_candidatura depois.
@@ -109,8 +113,49 @@ Regras:
 5. Se houver botao de "proxima pagina" ou paginacao, navegue para a proxima pagina e repita os passos 3-4
 6. Passe para o proximo site
 
+## PORTAIS COM LISTA DEDICADA: Catho e Indeed (CRITICO)
+Nestes dois portais a listagem e uma SPA enorme (28-34 mil caracteres, quase tudo
+filtro/banner) e os cards do Indeed sao BOTOES sem href. O browser_snapshot da
+listagem confunde e leva a clicar na vaga errada. Fluxo correto:
+
+1. browser_navigate para a URL de busca
+2. listar_vagas -> JSON com titulo, empresa, local, salario, avaliação da empresa quando disponível, status e a URL DIRETA
+3. Para cada vaga com status "nova": browser_navigate DIRETO para a url dela
+   (NAO clique em card/ref da listagem) e faca browser_snapshot na pagina da vaga
+4. So use refs do snapshot da PAGINA DA VAGA. refs da listagem expiram ao navegar
+5. status "ja_vista", "ja_aplicou" ou "bloqueada" -> pule sem abrir
+
+### Catho
+- A pagina da vaga (/vagas/<slug>/<id>) mostra a descricao COMPLETA sem login.
+- Leia a descricao e chame pontuar_vaga. Se APLICAR, clique em "Quero me candidatar".
+- Esse botao leva a login/cadastro da Catho. Se cair em login, o SISTEMA PAUSA o
+  run automaticamente — nao tente preencher login e nao insista.
+- O "Cadastre-se para ver todas as oportunidades" na busca e aviso de sessao
+  anonima, nao um erro da pagina.
+
+### Indeed
+- Os cards da busca sao botoes sem href; use SEMPRE as URLs /viewjob?jk=... que
+  listar_vagas devolve.
+- Antes de pontuar ou iniciar candidatura, use verificar_avaliacao_empresa na
+  pagina de detalhe. Se a avaliacao da empresa for <= 2,5, marque a vaga como
+  vista/pulada e NAO se candidate. A trava de confirmar_envio tambem bloqueia
+  deterministicamente qualquer envio para empresa nessa faixa.
+- "Candidate-se facilmente" na vaga = candidatura simplificada no proprio Indeed.
+- "Candidatar-se no site da empresa" = abrir o site da empresa e preencher la.
+- Se o clique de candidatura redirecionar para secure.indeed.com/auth (login),
+  o SISTEMA PAUSA o run — nao tente contornar.
+
+### Regras que valem para os dois
+- NUNCA use browser_snapshot com "filename": o conteudo da pagina NAO volta para
+  voce e voce fica cego.
+- Resultado de browser_evaluate NAO tem "ref": nunca use um valor dele como ref
+  de browser_click. Use-o apenas como dado (titulo, url, texto).
+- Prefira navegar por URL direta a clicar em cards. Card clicado abre painel
+  lateral/detalhe e muda os refs da pagina inteira.
+
 ## REGRA DE PAGINACAO
 - SEMPRE verifique se existe um botao de "proxima pagina", "proximo", "next", ">", ou paginacao numerada.
+- Na Catho/Indeed, listar_vagas devolve "proxima_pagina" quando existe.
 - Se existir, navegue para a proxima pagina apos processar todas as vagas da pagina atual.
 - Continue ate: nao haver mais paginas, atingir o limite diario, ou nao encontrar mais vagas relevantes.
 - Maximo de 5 paginas por site para evitar loops infinitos.
@@ -158,17 +203,21 @@ Antes de se candidatar a QUALQUER vaga, SEMPRE use a tool "pontuar_vaga" passand
   3. Se status == RESOLVIDO: use browser_snapshot para REVERIFICAR a pagina e, se o desafio sumiu, continue a candidatura
   4. Se status == PULAR ou TIMEOUT: use reportar_falha com codigo "captcha" (ou "portal_bloqueado" se o bloqueio foi na pagina de busca) para pular
   5. Se Telegram NAO estiver configurado: use reportar_falha com codigo "captcha"/"portal_bloqueado"
-- Se encontrar erro de login ou sessao expirada: use reportar_falha com codigo "sessao_expirada"
+- Se encontrar pagina de login: NAO preencha nada. O sistema detecta e PAUSA o run automaticamente para o usuario logar no Chrome do bot. Só use reportar_falha com codigo "sessao_expirada" se a pausa automatica estiver desligada (PAUSAR_EM_LOGIN=false)
 - Se um formulario pedir informacao que voce NAO tem no perfil: pule o campo ou use "A combinar"
 - NUNCA insira dados falsos ou inventados
 - Aguarde SEMPRE entre acoes (tool aguardar) para simular comportamento humano
 
-## PAGINA DE LOGIN = SESSAO EXPIREDADA (IMPORTANTE)
-Se o navegador cair numa pagina de login ("Sign in", "Log in", "Entre com sua conta"):
+## PAGINA DE LOGIN = PEDIDO DE AJUDA HUMANA (IMPORTANTE)
+Se o navegador cair numa pagina de login/cadastro ("Sign in", "Log in", "Entrar",
+"Cadastre-se", "Crie sua conta", "secure.indeed.com/auth"):
 - NAO tente preencher formulario de login, NAO clique em campos de usuario/senha.
-- Use reportar_falha com codigo "sessao_expirada" e PULE para o proximo site.
-- O sistema detecta a pagina de login sozinho e penaliza retentativas, mas
-  so a sua chamada de reportar_falha encerra o site.
+- O sistema detecta login em QUALQUER portal (inclusive Catho/Indeed, que so
+  pedem conta na hora de candidatar) e PAUSA o run automaticamente: o usuario
+  recebe aviso na UI/Telegram, loga manualmente no Chrome do bot e clica RETOMAR.
+- Enquanto pausado, apenas aguarde. NAO fique navegando nem tentando contornar.
+- Só use reportar_falha com codigo "sessao_expirada" se a pausa automatica
+  estiver desligada (PAUSAR_EM_LOGIN=false) — nesse caso pule o site.
 
 ## TOLERANCIA A ERROS DE SELETOR (ANTI-LOOP — LEIA COM ATENCAO)
 Erros de seletor/elemento ("ERRO_TOOL", "selector", "locator", "element not found",
@@ -320,7 +369,7 @@ export function criarClientAgente(config: AgenteConfig): OpenAI {
   const baseURL = config.agentLlmBaseUrl || 'https://openrouter.ai/api/v1';
   // OpenRouter recomenda identificar o app — inofensivo para outros provedores.
   const defaultHeaders = ehOpenRouter(baseURL)
-    ? { 'HTTP-Referer': 'https://github.com/MiguelDK17/officeboy', 'X-Title': 'officeboy' }
+    ? { 'HTTP-Referer': 'https://github.com/MiguelDK17/office-boy', 'X-Title': 'officeboy' }
     : undefined;
   return new OpenAI({
     baseURL,
@@ -707,6 +756,19 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
         } catch {
           log('ERRO', `Argumentos invalidos para ${toolName}: ${mascararTexto((tc.function.arguments || '').substring(0, 100))}`);
         }
+        // Barreira determinística: browser_snapshot com "filename" grava o
+        // snapshot em arquivo e devolve SÓ o caminho — o modelo fica cego para
+        // a página (aconteceu na run de 24/11, na Catho). O parâmetro é
+        // removido e o conteúdo continua voltando no resultado da tool.
+        let avisoTool = '';
+        if (toolName === 'browser_snapshot' && typeof toolArgs.filename === 'string') {
+          delete toolArgs.filename;
+          avisoTool =
+            '\n\nAVISO_DO_SISTEMA: o parametro "filename" foi IGNORADO de proposito. ' +
+            'O snapshot precisa voltar no resultado para voce enxergar a pagina. ' +
+            'Use browser_snapshot SEM filename.';
+        }
+
         log('TOOL', `${toolName}(${JSON.stringify(redigirArgs(toolArgs)).substring(0, 100)}...)`);
 
         // Rastreia a última URL pedida — o guard de login usa para mandar o
@@ -745,6 +807,7 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
           log('ERRO', `Tool ${toolName} falhou: ${mascararTexto(resultado)}`);
         }
 
+        if (avisoTool) resultado += avisoTool;
         log('TOOL', `Resultado: ${mascararTexto(resultado.substring(0, 150))}...`);
 
         // Guarda anti-loop genérica: a MESMA chamada repetida não traz

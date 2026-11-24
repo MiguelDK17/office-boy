@@ -15,14 +15,15 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { log } from './logger.js';
 import type { SitesConfig } from './types.js';
+import { extrairResultadoEvaluate, montarScriptLerPagina } from './portais.js';
 
 // Página de login: URL de autenticação + marcador textual. Os dois juntos
 // evitam falso positivo (ex.: um link "Sign in" solto na navegação de uma
 // página logada).
 const RE_URL_LOGIN =
-  /https?:\/\/[^\s)\]]*(?:\/login|\/signin|\/sign-in|\/checkpoint\/login|\/auth\/|\/accounts\/login|\/uas\/login)/i;
+  /https?:\/\/[^\s)\]]*(?:\/login|\/signin|\/sign-in|\/checkpoint\/login|\/auth(?:[/?#]|$)|\/accounts\/login|\/uas\/login|\/cadastro-candidato|\/cadastro|\/registro|\/register|\/criar-conta|\/entrar(?:[/?#]|$))/i;
 const RE_MARCADOR_LOGIN =
-  /\b(sign in|log in|login|entrar|iniciar sess[aã]o|fazer login|entre com sua conta)\b/i;
+  /\b(sign in|log in|login|entrar|iniciar sess[aã]o|fazer login|entre com sua conta|cadastre-se|cadastre se|crie sua conta|criar conta|create account|sign up)\b/i;
 
 /**
  * Detecta se a tool devolveu uma PÁGINA DE LOGIN (sessão expirada ou
@@ -143,6 +144,37 @@ export interface ResultadoSessao {
 }
 
 /**
+ * Lê URL/título/texto visível da aba atual.
+ *
+ * `browser_navigate` devolve APENAS "### Page / - Page URL / - Page Title" —
+ * nenhum conteúdo. Sem esta leitura, o health check era cego: `ehPaginaDeLogin`
+ * e `exigeLoginParaCandidatar` dependem de texto que nunca chegava (Catho
+ * anônima era classificada como "OK" na run de 24/11).
+ */
+export async function lerPaginaAtual(
+  mcpClient: Client,
+): Promise<{ url: string; title: string; texto: string } | null> {
+  try {
+    const resp = await mcpClient.callTool({
+      name: 'browser_evaluate',
+      arguments: { function: montarScriptLerPagina() },
+    });
+    const dados = extrairResultadoEvaluate(
+      extrairTextoMcp((resp as { content?: unknown }).content),
+    );
+    if (!dados || typeof dados !== 'object') return null;
+    const d = dados as Record<string, unknown>;
+    return {
+      url: typeof d.url === 'string' ? d.url : '',
+      title: typeof d.title === 'string' ? d.title : '',
+      texto: typeof d.texto === 'string' ? d.texto : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Health check de sessão pré-run: para cada site ATIVO com `urls_busca`
  * configuradas, navega à primeira URL e classifica a sessão.
  *
@@ -163,13 +195,13 @@ export async function verificarSessoes(
   for (const site of alvos) {
     const url = site.urls_busca[0];
     log('SESSAO', `Verificando sessao em ${site.nome} (${url})...`);
-    let texto: string;
+    let navegacao: string;
     try {
       const mcpResult = await mcpClient.callTool({
         name: 'browser_navigate',
         arguments: { url },
       });
-      texto = extrairTextoMcp((mcpResult as { content?: unknown }).content);
+      navegacao = extrairTextoMcp((mcpResult as { content?: unknown }).content);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       resultados.push({ site: site.nome, status: 'erro', url, detalhe: msg.substring(0, 200) });
@@ -177,11 +209,18 @@ export async function verificarSessoes(
       continue;
     }
 
+    // Conteúdo real da página (o navigate não traz body). Se a leitura falhar,
+    // cai para o retorno da navegação — melhor que ficar cego de vez.
+    const pagina = await lerPaginaAtual(mcpClient);
+    const texto = pagina
+      ? `Page URL: ${pagina.url || url}\nPage Title: ${pagina.title}\n${pagina.texto}`
+      : navegacao;
+
     let status: StatusSessao;
-    if (ehPaginaDeLogin(texto) || exigeLoginParaCandidatar(site.nome, texto)) {
-      status = 'login_exigido';
-    } else if (texto.startsWith('ERRO_TOOL') || /net::ERR_|Navigation timeout/i.test(texto.slice(0, 500))) {
+    if (navegacao.startsWith('ERRO_TOOL') || /net::ERR_|Navigation timeout/i.test(navegacao.slice(0, 500))) {
       status = 'erro';
+    } else if (ehPaginaDeLogin(texto) || exigeLoginParaCandidatar(site.nome, texto)) {
+      status = 'login_exigido';
     } else {
       status = 'ok';
     }

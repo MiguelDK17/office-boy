@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { inicializarBanco, fecharBanco, verificarJaAplicou } from '../src/database';
-import { criarExecutorDeTools, dominioDe } from '../src/tools';
+import { criarExecutorDeTools, dominioDe, customToolNames } from '../src/tools';
 import type { Perfil, AgenteConfig } from '../src/types';
 
 // Perfil minimo para o executor
@@ -133,6 +133,24 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
     expect((JSON.parse(r2) as { permitido: boolean }).permitido).toBe(true);
     expect((JSON.parse(r3) as { permitido: boolean }).permitido).toBe(false);
     expect(r3).toMatch(/TETO_POR_EXECUCAO/);
+  });
+});
+
+describe('listar_vagas — suporte dedicado a Catho/Indeed', () => {
+  it('a tool está registrada no catálogo do agente', () => {
+    expect(customToolNames.has('listar_vagas')).toBe(true);
+    expect(customToolNames.has('verificar_avaliacao_empresa')).toBe(true);
+  });
+
+  it('em site não suportado orienta usar browser_snapshot sem filename', async () => {
+    // Sem MCP inicializado o branch de portal é decidido antes de qualquer
+    // chamada ao navegador; aqui simulamos apenas o contrato de mensagem.
+    const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: true }));
+    // getMCPClient lança se o MCP não estiver conectado — a tool deve degradar
+    // com erro claro em vez de derrubar o run.
+    const resp = await executar('listar_vagas', {});
+    expect(resp).toMatch(/mensagem|erro/);
+    expect(resp).toMatch(/browser_snapshot|MCP/i);
   });
 });
 

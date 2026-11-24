@@ -37,6 +37,16 @@ import { pontuarVaga } from './scoring.js';
 import { estaNaBlacklist } from './blacklist.js';
 import { chaveVaga } from './chave-vaga.js';
 import { urlAtualDoChrome } from './url-pagina.js';
+import { getMCPClient } from './mcp-client.js';
+import { extrairTextoMcp } from './sessao.js';
+import {
+  portalDaUrl,
+  montarScriptListarVagas,
+  montarScriptLerAvaliacaoIndeed,
+  extrairResultadoEvaluate,
+  normalizarVagasListadas,
+  normalizarAvaliacaoEmpresa,
+} from './portais.js';
 import type { Perfil, RespostasPredefinidas, AgenteConfig } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -118,6 +128,26 @@ const customToolDefs: CustomToolDef[] = [
       },
       required: ['url'],
     },
+  },
+  {
+    name: 'listar_vagas',
+    description:
+      'OBRIGATORIA nas paginas de RESULTADO da Catho e do Indeed. Le a listagem atual e devolve JSON limpo com titulo, empresa, local, salario, status no banco (nova/ja_vista/ja_aplicou/bloqueada) e a URL DIRETA de cada vaga. Use ANTES de qualquer browser_snapshot na listagem: ela e grande (28-34k chars de filtros) e os cards do Indeed sao botoes sem href. Depois navegue DIRETO para a url de cada vaga "nova" com browser_navigate. NAO use refs desta lista (ela nao tem refs).',
+    parameters: {
+      type: "object",
+      properties: {
+        limite: {
+          type: "number",
+          description: 'Maximo de vagas a retornar (padrao 25, teto 50)',
+        },
+      },
+    },
+  },
+  {
+    name: 'verificar_avaliacao_empresa',
+    description:
+      'OBRIGATORIA em vagas do Indeed antes de pontuar ou candidatar. Lê a avaliação pública da empresa na página de detalhe. Se a nota for menor ou igual a 2.5, NÃO se candidate; pule a vaga. Se não houver avaliação pública, retorna null e o fluxo pode continuar. Não use a nota da vaga para substituir a nota da empresa.',
+    parameters: { type: 'object', properties: {} },
   },
   {
     name: 'registrar_candidatura',
@@ -678,6 +708,10 @@ export function criarExecutorDeTools(
   // repetir o número depois no confirmar_envio.
   limparPendentesAntigos();
   const scorePorVaga = new Map<string, number>();
+  // A avaliação do Indeed precisa ser verificada antes de qualquer envio.
+  // Guardamos por vaga para preservar a decisão mesmo quando o botão abre o
+  // site externo da empresa e a aba deixa de estar no Indeed.
+  const avaliacaoIndeedPorVaga = new Map<string, number | null>();
   const chaveScore = (titulo: string, empresa: string) =>
     `${(titulo || '').trim().toLowerCase()}|${(empresa || '').trim().toLowerCase()}`;
   // A aba ativa nem sempre é a da vaga: só confiar nela se for o MESMO portal.
@@ -815,6 +849,42 @@ export function criarExecutorDeTools(
         const acaoNormalizada = acao.toLocaleLowerCase('pt-BR');
         const ehMensagemRecrutador = acaoNormalizada.includes('mensagem')
           && acaoNormalizada.includes('recrutador');
+
+        if (!ehMensagemRecrutador) {
+          let hostVaga = '';
+          try { hostVaga = new URL(urlVaga).hostname.toLowerCase(); } catch { /* validação abaixo */ }
+          const ehIndeed = hostVaga === 'indeed.com' || hostVaga.endsWith('.indeed.com');
+          if (ehIndeed) {
+            const chave = chaveVaga(urlVaga);
+            let nota = avaliacaoIndeedPorVaga.get(chave);
+            if (!avaliacaoIndeedPorVaga.has(chave)) {
+              let hostAtual = '';
+              try { hostAtual = new URL(real || '').hostname.toLowerCase(); } catch { /* sem aba */ }
+              const atualNoIndeed = hostAtual === 'indeed.com' || hostAtual.endsWith('.indeed.com');
+              if (atualNoIndeed) {
+                try {
+                  const resp = await getMCPClient().callTool({
+                    name: 'browser_evaluate',
+                    arguments: { function: montarScriptLerAvaliacaoIndeed() },
+                  });
+                  const bruto = extrairResultadoEvaluate(
+                    extrairTextoMcp((resp as { content?: unknown }).content),
+                  );
+                  const dados = bruto && typeof bruto === 'object' ? bruto as Record<string, unknown> : {};
+                  nota = normalizarAvaliacaoEmpresa(dados.avaliacao_empresa);
+                  avaliacaoIndeedPorVaga.set(chave, nota);
+                } catch {
+                  return JSON.stringify({ permitido: false, motivo: 'AVALIACAO_NAO_VERIFICADA', mensagem: 'Não foi possível verificar a avaliação da empresa no Indeed. NÃO envie; consulte verificar_avaliacao_empresa e tente novamente.' });
+                }
+              } else {
+                return JSON.stringify({ permitido: false, motivo: 'AVALIACAO_NAO_VERIFICADA', mensagem: 'A avaliação da empresa no Indeed ainda não foi verificada. Volte à página da vaga, use verificar_avaliacao_empresa e só então prossiga.' });
+              }
+            }
+            if (nota !== null && nota !== undefined && nota <= 2.5) {
+              return JSON.stringify({ permitido: false, motivo: 'AVALIACAO_EMPRESA_BAIXA', mensagem: `Empresa bloqueada: avaliação ${nota.toLocaleString('pt-BR')} <= 2,5 no Indeed. NÃO envie; pule para a próxima vaga.` });
+            }
+          }
+        }
 
         if (!ehMensagemRecrutador) {
           const bloqueio = verificarBloqueioPermanente(urlVaga)
@@ -1016,6 +1086,114 @@ export function criarExecutorDeTools(
         const tempo = Math.floor(Math.random() * (max - min + 1)) + min;
         await new Promise((resolve) => setTimeout(resolve, tempo));
         return `Aguardou ${tempo}ms com sucesso.`;
+      }
+
+      case 'listar_vagas': {
+        const limite = Number(args.limite) || 25;
+        try {
+          const client = getMCPClient();
+          const resp = await client.callTool({
+            name: 'browser_evaluate',
+            arguments: { function: montarScriptListarVagas(limite) },
+          });
+          const bruto = extrairResultadoEvaluate(
+            extrairTextoMcp((resp as { content?: unknown }).content),
+          );
+          // O próprio script declara o portal (independe de qual aba o CDP
+          // lista primeiro). `urlAtualDoChrome` é só fallback de diagnóstico.
+          const urlAtual = (await urlAtualDoChrome()) ?? '';
+          const { portal, vagas, proxima_pagina } = normalizarVagasListadas(
+            portalDaUrl(urlAtual),
+            bruto,
+            limite,
+          );
+
+          if (portal === 'generico') {
+            return JSON.stringify({
+              portal: 'nao_suportado',
+              mensagem:
+                'listar_vagas cobre Catho e Indeed. Neste site use browser_snapshot (sem o parametro filename) para ler a listagem.',
+            });
+          }
+          if (vagas.length === 0) {
+            return JSON.stringify({
+              portal,
+              total: 0,
+              mensagem:
+                'Nenhuma vaga extraida. A pagina pode estar carregando: use aguardar (2000-4000ms) e chame listar_vagas de novo. Se persistir, use browser_snapshot (sem filename).',
+            });
+          }
+
+          // Enriquecer com o banco: o modelo não deve gastar uma tool call por
+          // vaga só para descobrir que ela já foi vista/aplicada.
+          const enriquecidas = vagas.map((v) => {
+            const bloqueio = verificarBloqueioPermanente(v.url);
+            const status = verificarJaAplicou(v.url)
+              ? 'ja_aplicou'
+              : bloqueio
+                ? 'bloqueada'
+                : verificarVagaJaVista(v.url)
+                  ? 'ja_vista'
+                  : 'nova';
+            return { ...v, status, ...(bloqueio ? { motivo_bloqueio: bloqueio.slice(0, 120) } : {}) };
+          });
+          const novas = enriquecidas.filter((v) => v.status === 'nova').length;
+          log('TOOL', `listar_vagas: ${enriquecidas.length} vaga(s) em ${portal} (${novas} nova(s))`);
+
+          return JSON.stringify(
+            {
+              portal,
+              total: enriquecidas.length,
+              novas,
+              proxima_pagina,
+              vagas: enriquecidas,
+              instrucao:
+                'Navegue DIRETO para a url de cada vaga com status "nova" (browser_navigate) e faca browser_snapshot na pagina da vaga. Ignore ja_vista/ja_aplicou/bloqueada. Esta lista NAO tem refs — nao tente clicar em nada dela.',
+            },
+            null,
+            1,
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log('ERRO', `listar_vagas falhou: ${msg.slice(0, 160)}`);
+          return JSON.stringify({
+            erro: msg.slice(0, 200),
+            mensagem:
+              'Falha ao extrair a lista. Use browser_snapshot (sem filename) na listagem e prossiga com as URLs visiveis.',
+          });
+        }
+      }
+
+      case 'verificar_avaliacao_empresa': {
+        const atual = await urlAtualDoChrome();
+        let host = '';
+        try { host = new URL(atual || '').hostname.toLowerCase(); } catch { /* sem URL */ }
+        if (!(host === 'indeed.com' || host.endsWith('.indeed.com'))) {
+          return JSON.stringify({ portal: 'nao_aplicavel', avaliacao_empresa: null, mensagem: 'Esta regra só se aplica ao Indeed.' });
+        }
+        try {
+          const resp = await getMCPClient().callTool({
+            name: 'browser_evaluate',
+            arguments: { function: montarScriptLerAvaliacaoIndeed() },
+          });
+          const bruto = extrairResultadoEvaluate(
+            extrairTextoMcp((resp as { content?: unknown }).content),
+          );
+          const dados = bruto && typeof bruto === 'object' ? bruto as Record<string, unknown> : {};
+          const nota = normalizarAvaliacaoEmpresa(dados.avaliacao_empresa);
+          if (atual) avaliacaoIndeedPorVaga.set(chaveVaga(atual), nota);
+          return JSON.stringify({
+            portal: 'indeed',
+            avaliacao_empresa: nota,
+            bloqueada: nota !== null && nota <= 2.5,
+            mensagem: nota !== null && nota <= 2.5
+              ? `Empresa bloqueada: avaliação ${nota.toLocaleString('pt-BR')} <= 2,5.`
+              : nota === null ? 'Não foi encontrada avaliação pública da empresa.' : `Avaliação da empresa: ${nota.toLocaleString('pt-BR')}.`,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return JSON.stringify({ portal: 'indeed', avaliacao_empresa: null, erro: msg.slice(0, 160), mensagem: 'Não foi possível ler a avaliação da empresa; não prossiga sem verificar novamente.' });
+        }
       }
 
       case 'salvar_screenshot': {
