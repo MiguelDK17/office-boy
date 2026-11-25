@@ -125,4 +125,33 @@ describe('pontuarVaga — critérios eliminatórios', () => {
     expect(r.eliminatorios.length).toBeGreaterThan(0);
     expect(r.veredicto).toBe('PULAR');
   });
+
+  it('respeita regra textual: fora de BH/RMBH, híbrido também é proibido', () => {
+    const perfil = fit({
+      cidade: 'Belo Horizonte, MG',
+      modelosAceitos: ['remoto', 'hibrido', 'presencial'],
+      regraLocalizacao: 'Presencial e híbrido em Belo Horizonte e região metropolitana; fora somente remoto.',
+    });
+    const r = pontuarVaga(
+      { tecnologias_pedidas: 'Java', localizacao: 'Curitiba, PR', modelo_trabalho: 'híbrido' },
+      perfil,
+      6,
+    );
+    expect(r.veredicto).toBe('PULAR');
+    expect(r.eliminatorios.join(' ')).toMatch(/somente remoto/i);
+  });
+
+  it('permite híbrido dentro da região metropolitana de BH', () => {
+    const r = pontuarVaga(
+      { tecnologias_pedidas: 'Java', localizacao: 'Contagem, MG', modelo_trabalho: 'híbrido' },
+      fit({
+        cidade: 'Belo Horizonte, MG',
+        modelosAceitos: ['remoto', 'hibrido', 'presencial'],
+        regraLocalizacao: 'Presencial e híbrido em Belo Horizonte e região metropolitana; fora somente remoto.',
+        localizacoesPresencialHibrido: ['Belo Horizonte', 'Contagem'],
+      }),
+      6,
+    );
+    expect(r.veredicto).toBe('APLICAR');
+  });
 });

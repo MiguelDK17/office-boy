@@ -23,6 +23,10 @@ export interface PerfilFit {
   /** Modelos de trabalho que o candidato aceita (ex.: ['remoto']). */
   modelosAceitos: string[];
   nivelIngles?: NivelIngles;
+  /** Regra textual de localização definida pelo candidato. */
+  regraLocalizacao?: string;
+  /** Cidades/regiões onde presencial ou híbrido são aceitos. */
+  localizacoesPresencialHibrido?: string[];
 }
 
 export interface ResultadoPontuacao {
@@ -46,6 +50,34 @@ function normalizarTexto(s: string): string {
 function normalizarCidade(cidade: string): string {
   const base = (cidade ?? '').split(',')[0] ?? '';
   return normalizarTexto(base);
+}
+
+function localizacaoPermitida(
+  localizacao: string,
+  cidadeBase: string,
+  localidadesPermitidas: string[] = [],
+): boolean {
+  const texto = normalizarTexto(localizacao);
+  if (!texto) return false;
+  const localidades = localidadesPermitidas.length > 0
+    ? localidadesPermitidas
+    : [cidadeBase];
+  return localidades.some((localidade) => {
+    const nome = normalizarTexto(localidade);
+    return nome.length > 1 && texto.includes(nome);
+  });
+}
+
+/**
+ * Regra textual restritiva: quando o candidato diz que fora da região só
+ * aceita remoto, presencial/híbrido fora da região vira eliminatório.
+ * Sem essa regra explícita, preservamos o comportamento configurável anterior.
+ */
+function exigeRemotoForaDaRegiao(regra: string | undefined): boolean {
+  const texto = normalizarTexto(regra ?? '');
+  return Boolean(texto)
+    && texto.includes('remoto')
+    && (texto.includes('fora') || texto.includes('outra local') || texto.includes('exclusiv'));
 }
 
 /** Mapeia um nível de inglês textual para ordinal. -1 = desconhecido (não elimina). */
@@ -91,9 +123,17 @@ export function pontuarVaga(
 
   // Localização (penalidade/bônus; usa a cidade do perfil, não um valor fixo)
   const cidadeBase = normalizarCidade(perfil.cidade);
+  const regraRestritiva = exigeRemotoForaDaRegiao(perfil.regraLocalizacao);
+  const naRegiaoPermitida = localizacaoPermitida(
+    localizacao,
+    cidadeBase,
+    perfil.localizacoesPresencialHibrido,
+  );
   const naCidade = !!cidadeBase && localizacao.includes(cidadeBase);
   const vagaPresencialOuHibrida = modelo.includes('presencial') || modelo.includes('hibrido');
-  if (naCidade) {
+  if (regraRestritiva && vagaPresencialOuHibrida && !naRegiaoPermitida) {
+    score -= 3;
+  } else if (naCidade || (regraRestritiva && naRegiaoPermitida)) {
     score += 1; // mesma cidade do candidato: aceita qualquer modelo
   } else if (vagaPresencialOuHibrida) {
     score -= 3; // fora da cidade e não remoto: penalidade forte
@@ -116,13 +156,20 @@ export function pontuarVaga(
     }
   }
 
-  // Localização: vaga presencial/híbrida fora da cidade quando o candidato só
-  // aceita remoto. Aí não é só penalidade — é incompatível.
+  // Localização: regra textual restritiva tem precedência sobre a lista geral
+  // de modelos aceitos. Fora da região autorizada, só remoto é permitido.
   const aceitaPresencial = perfil.modelosAceitos.some((m) => {
     const mn = normalizarTexto(m);
     return mn.includes('presencial') || mn.includes('hibrido');
   });
-  if (vagaPresencialOuHibrida && !naCidade && !aceitaPresencial) {
+  if (regraRestritiva && vagaPresencialOuHibrida && !naRegiaoPermitida) {
+    const localidades = perfil.localizacoesPresencialHibrido?.length
+      ? perfil.localizacoesPresencialHibrido.join(', ')
+      : perfil.cidade;
+    eliminatorios.push(
+      `Vaga ${vaga.modelo_trabalho ?? 'presencial/hibrida'} em ${vaga.localizacao || 'localizacao desconhecida'} fora das localidades permitidas (${localidades}); pela regra do perfil, fora delas o candidato aceita somente remoto`,
+    );
+  } else if (vagaPresencialOuHibrida && !naCidade && !aceitaPresencial) {
     eliminatorios.push(
       `Vaga ${vaga.modelo_trabalho ?? 'presencial/hibrida'} fora de ${perfil.cidade}; candidato aceita apenas: ${perfil.modelosAceitos.join(', ')}`,
     );

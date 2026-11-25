@@ -33,7 +33,7 @@ import {
   calcularBackoff,
   MAX_TENTATIVAS,
 } from './erros.js';
-import { pontuarVaga } from './scoring.js';
+import { pontuarVaga, type ResultadoPontuacao } from './scoring.js';
 import { estaNaBlacklist } from './blacklist.js';
 import { chaveVaga } from './chave-vaga.js';
 import { urlAtualDoChrome } from './url-pagina.js';
@@ -48,6 +48,14 @@ import {
   normalizarAvaliacaoEmpresa,
 } from './portais.js';
 import type { Perfil, RespostasPredefinidas, AgenteConfig } from './types.js';
+import { validarDadosCandidatura } from './validacao-candidatura.js';
+import {
+  analisePodeLiberar,
+  chaveAnalise,
+  montarScriptAnalisarDescricao,
+  normalizarAnaliseDescricao,
+  type RegistroAnaliseDescricao,
+} from './descricao-vaga.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -150,6 +158,19 @@ const customToolDefs: CustomToolDef[] = [
     parameters: { type: 'object', properties: {} },
   },
   {
+    name: 'analisar_descricao_vaga',
+    description:
+      'OBRIGATORIA antes de pontuar ou candidatar-se. Extrai somente o contêiner principal da vaga atual (Catho, Indeed, Gupy ou LinkedIn), remove navegação/anúncios/recomendações e registra uma análise vinculada à URL, título e empresa. Se a confiança for baixa, a vaga não poderá ser enviada; pule para a próxima. Não use document.body.innerText para substituir esta ferramenta.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url_vaga: { type: 'string', description: 'URL da vaga atual; opcional quando a aba já está na vaga.' },
+        titulo_vaga: { type: 'string', description: 'Título esperado da vaga, se já identificado.' },
+        empresa: { type: 'string', description: 'Empresa esperada da vaga, se já identificada.' },
+      },
+    },
+  },
+  {
     name: 'registrar_candidatura',
     description:
       'Registra no banco de dados que uma candidatura foi realizada com sucesso. Chamar APOS preencher e enviar o formulario.',
@@ -218,6 +239,14 @@ const customToolDefs: CustomToolDef[] = [
         mensagem_enviada: {
           type: "boolean",
           description: 'Se uma mensagem personalizada foi enviada ao recrutador.',
+        },
+        cpf: {
+          type: "string",
+          description: 'CPF real preenchido no formulário. Obrigatório para candidatura; nunca use "a combinar".',
+        },
+        pretensao_salarial: {
+          type: "string",
+          description: 'Valor positivo de pretensão salarial preenchido no formulário. Nunca use 0 ou "a combinar".',
         },
       },
       required: ['url_vaga', 'plataforma', 'titulo_vaga', 'empresa', 'score'],
@@ -708,6 +737,8 @@ export function criarExecutorDeTools(
   // repetir o número depois no confirmar_envio.
   limparPendentesAntigos();
   const scorePorVaga = new Map<string, number>();
+  const decisaoLocalizacaoPorVaga = new Map<string, ResultadoPontuacao>();
+  const analisesPorVaga = new Map<string, RegistroAnaliseDescricao>();
   // A avaliação do Indeed precisa ser verificada antes de qualquer envio.
   // Guardamos por vaga para preservar a decisão mesmo quando o botão abre o
   // site externo da empresa e a aba deixa de estar no Indeed.
@@ -745,6 +776,16 @@ export function criarExecutorDeTools(
     const score = dados.score
       || scorePorVaga.get(chaveScore(dados.titulo_vaga, dados.empresa))
       || 0;
+    if (perfil.regra_localizacao) {
+      const decisao = decisaoLocalizacaoPorVaga.get(chaveScore(dados.titulo_vaga, dados.empresa));
+      if (!decisao || decisao.eliminatorios.length > 0 || decisao.veredicto !== 'APLICAR') {
+        return {
+          registrado: false,
+          motivo: 'LOCALIZACAO_NAO_VALIDADA',
+          mensagem: 'A vaga não passou pela validação determinística de localização. Use pontuar_vaga e pule se o veredicto for PULAR.',
+        };
+      }
+    }
     const bl = estaNaBlacklist(dados.empresa, dados.titulo_vaga, perfil.blacklist_empresas, perfil.blacklist_termos_titulo);
     if (bl.bloqueado) {
       log('AGENTE', `Candidatura BLOQUEADA (blacklist): ${dados.titulo_vaga} — ${dados.empresa}`);
@@ -789,6 +830,27 @@ export function criarExecutorDeTools(
 
   const bloqueados = new Set(dominiosBloqueados.map(d => d.toLowerCase()));
 
+  function contemTermoBloqueado(analise: RegistroAnaliseDescricao): string | null {
+    const texto = `${analise.titulo} ${analise.descricao} ${Object.values(analise.secoes).join(' ')}`.toLocaleLowerCase();
+    // Empresas bloqueadas só valem para a empresa identificada, não para uma
+    // menção incidental no corpo da descrição.
+    if (estaNaBlacklist(analise.empresa, analise.titulo, perfil.blacklist_empresas, []).bloqueado) {
+      return analise.empresa;
+    }
+    const termos = perfil.blacklist_termos_titulo ?? [];
+    return termos.find((termo) => termo.trim() && texto.includes(termo.trim().toLocaleLowerCase())) ?? null;
+  }
+
+  const ehTransicaoFormularioConhecida = (real: string, vaga: string): boolean => {
+    try {
+      const atual = new URL(real);
+      const origem = new URL(vaga);
+      if (!atual.hostname.toLowerCase().endsWith('.gupy.io') && atual.hostname.toLowerCase() !== 'gupy.io') return false;
+      if (atual.hostname !== origem.hostname) return false;
+      return /^\/candidates\/(?:jobs\/\d+\/apply|applications\/\d+)/.test(atual.pathname);
+    } catch { return false; }
+  };
+
   return async function executarTool(name: string, args: Record<string, unknown>): Promise<string> {
     // Barreira determinística: o prompt já omite os sites sem sessão, mas o
     // modelo ainda poderia navegar até eles por conta própria.
@@ -806,6 +868,46 @@ export function criarExecutorDeTools(
     switch (name) {
       case 'obter_perfil_candidato': {
         return JSON.stringify(perfil, null, 2);
+      }
+
+      case 'analisar_descricao_vaga': {
+        const urlInformada = String(args.url_vaga ?? '');
+        const urlAtual = await urlAtualDoChrome();
+        const url = urlAtual && (!urlInformada || urlRealConfiavel(urlInformada, urlAtual)) ? urlAtual : urlInformada;
+        let bruto: unknown;
+        try {
+          const resp = await getMCPClient().callTool({
+            name: 'browser_evaluate',
+            arguments: { function: montarScriptAnalisarDescricao() },
+          });
+          bruto = extrairResultadoEvaluate(
+            extrairTextoMcp((resp as { content?: unknown }).content),
+          );
+        } catch (err) {
+          return JSON.stringify({ permitido: false, motivo: 'DESCRICAO_NAO_IDENTIFICADA', mensagem: `Não foi possível extrair a descrição da vaga: ${err instanceof Error ? err.message.slice(0, 160) : String(err).slice(0, 160)}` });
+        }
+
+        const urlBruta = bruto && typeof bruto === 'object' ? String((bruto as Record<string, unknown>).url ?? '') : '';
+        if (!urlBruta || (urlInformada && chaveVaga(urlBruta) !== chaveVaga(urlInformada))) {
+          return JSON.stringify({
+            permitido: false,
+            motivo: 'DESCRICAO_NAO_IDENTIFICADA',
+            mensagem: 'A página analisada não corresponde à URL da vaga informada. Volte à página da vaga e tente novamente.',
+          });
+        }
+        const analise = normalizarAnaliseDescricao(bruto, url);
+        const termo = contemTermoBloqueado(analise);
+        if (termo) analise.avisos.push('TERMO_BLOQUEADO');
+        analisesPorVaga.set(analise.chave, analise);
+        const liberada = analisePodeLiberar(analise, analise.url, analise.titulo, analise.empresa)
+          && !termo;
+        log('TOOL', `analisar_descricao_vaga: ${analise.titulo || '[sem título]'} (${analise.portal}, confiança ${analise.confianca.toFixed(2)})`);
+        return JSON.stringify({
+          ...analise,
+          permitido_para_candidatura: liberada,
+          motivo: liberada ? 'Descrição identificada e registrada para esta vaga.' : 'DESCRICAO_NAO_IDENTIFICADA: não prossiga com candidatura; pule a vaga.',
+          ...(termo ? { termo_bloqueado: termo } : {}),
+        }, null, 1);
       }
 
       case 'verificar_ja_aplicou': {
@@ -849,6 +951,67 @@ export function criarExecutorDeTools(
         const acaoNormalizada = acao.toLocaleLowerCase('pt-BR');
         const ehMensagemRecrutador = acaoNormalizada.includes('mensagem')
           && acaoNormalizada.includes('recrutador');
+
+        const tituloEnvio = String(args.titulo_vaga ?? '');
+        const empresaEnvio = String(args.empresa ?? '');
+        const analise = analisesPorVaga.get(chaveAnalise(urlVaga, tituloEnvio, empresaEnvio));
+        if (!analisePodeLiberar(analise, urlVaga, tituloEnvio, empresaEnvio) || !analise) {
+          return JSON.stringify({
+            permitido: false,
+            motivo: 'ANALISE_DESCRICAO_OBRIGATORIA',
+            mensagem: 'Envio bloqueado: use analisar_descricao_vaga na vaga atual e só prossiga se permitido_para_candidatura=true. A análise deve corresponder exatamente à URL, título e empresa informados.',
+          });
+        }
+
+        // A URL informada não pode apontar para A enquanto o navegador está
+        // efetivamente em B. A única exceção é a transição conhecida do Gupy
+        // para a etapa de formulário da mesma vaga.
+        if (!real || (chaveVaga(real) !== chaveVaga(urlVaga) && !ehTransicaoFormularioConhecida(real, urlVaga))) {
+          return JSON.stringify({
+            permitido: false,
+            motivo: 'PAGINA_ATUAL_NAO_CORRESPONDE_A_VAGA',
+            mensagem: 'Envio bloqueado: a página atual não corresponde à vaga analisada. Volte à vaga correta e tente novamente.',
+          });
+        }
+
+        // Se ainda estamos na página da vaga, refaça a extração e compare o
+        // fingerprint. Isso invalida análises antigas quando uma SPA troca o
+        // conteúdo sem mudar URL/título/empresa. Em etapas de formulário Gupy,
+        // preservamos a evidência da página original.
+        if (chaveVaga(real) === chaveVaga(urlVaga) && !ehTransicaoFormularioConhecida(real, urlVaga)) {
+          try {
+            const resp = await getMCPClient().callTool({
+              name: 'browser_evaluate',
+              arguments: { function: montarScriptAnalisarDescricao() },
+            });
+            const atual = normalizarAnaliseDescricao(
+              extrairResultadoEvaluate(extrairTextoMcp((resp as { content?: unknown }).content)),
+              real,
+            );
+            if (atual.hash !== analise.hash || atual.chave !== analise.chave) {
+              return JSON.stringify({ permitido: false, motivo: 'ANALISE_DESCRICAO_DESATUALIZADA', mensagem: 'A descrição da página mudou desde a análise. Reanalise a vaga antes de enviar.' });
+            }
+          } catch {
+            return JSON.stringify({ permitido: false, motivo: 'ANALISE_DESCRICAO_NAO_REVALIDADA', mensagem: 'Não foi possível revalidar a descrição da vaga atual. NÃO envie.' });
+          }
+        }
+
+        // Trava final: não permita que dado ausente seja mascarado como
+        // "a combinar" nem que um campo numérico caia em zero.
+        if (!ehMensagemRecrutador) {
+          const validacaoDados = validarDadosCandidatura({
+            cpf: args.cpf,
+            pretensaoSalarial: args.pretensao_salarial,
+          });
+          if (!validacaoDados.valido) {
+            log('AGENTE', `Envio bloqueado: dados obrigatórios inválidos (${validacaoDados.erros.join(' | ')})`);
+            return JSON.stringify({
+              permitido: false,
+              motivo: 'DADOS_CANDIDATURA_INVALIDOS',
+              mensagem: `NÃO envie a candidatura. ${validacaoDados.erros.join(' ')}`,
+            });
+          }
+        }
 
         if (!ehMensagemRecrutador) {
           let hostVaga = '';
@@ -980,8 +1143,8 @@ export function criarExecutorDeTools(
       }
 
       case 'pontuar_vaga': {
-        // Lógica pura extraída para src/scoring.ts: usa a cidade do perfil e o
-        // SCORE_MINIMO configurável (antes "uberlandia" e 6 estavam hardcoded).
+        // Lógica pura extraída para src/scoring.ts: usa cidade, região e regra
+        // de localização do perfil, além do SCORE_MINIMO configurável.
         const resultado = pontuarVaga(
           {
             tecnologias_pedidas: args.tecnologias_pedidas as string | undefined,
@@ -995,8 +1158,14 @@ export function criarExecutorDeTools(
             cidade: perfil.cidade,
             modelosAceitos: perfil.modelo_trabalho,
             nivelIngles: perfil.nivel_ingles,
+            regraLocalizacao: perfil.regra_localizacao,
+            localizacoesPresencialHibrido: perfil.localizacoes_presencial_hibrido,
           },
           config.scoreMinimo,
+        );
+        decisaoLocalizacaoPorVaga.set(
+          chaveScore(String(args.titulo_vaga ?? ''), String(args.empresa ?? '')),
+          resultado,
         );
 
         // Blacklist declarativa do candidato (exclusão dura, separada do score):

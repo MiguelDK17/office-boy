@@ -9,6 +9,8 @@ export interface Perfil {
   nome: string;
   email: string;
   telefone: string;
+  /** CPF real do candidato; nunca deve ser inventado ou substituído por "a combinar". */
+  cpf?: string;
   linkedin: string;
   github: string;
   portfolio: string;
@@ -28,6 +30,8 @@ export interface Perfil {
   informacoes_extras?: Record<string, string>;
   // Preferências opcionais (retrocompatíveis — ausentes = comportamento atual)
   regra_localizacao?: string;
+  /** Localidades onde presencial/híbrido são aceitos; fora delas vale a regra textual. */
+  localizacoes_presencial_hibrido?: string[];
   nivel_ingles?: NivelIngles;
   blacklist_empresas?: string[];
   blacklist_termos_titulo?: string[];

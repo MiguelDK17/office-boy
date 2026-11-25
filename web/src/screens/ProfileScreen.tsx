@@ -226,6 +226,12 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
             <Field label="Nome completo" value={str(p, "nome")} onChange={(v) => set("nome", v)} />
             <Field label="E-mail" type="email" value={str(p, "email")} onChange={(v) => set("email", v)} />
             <Field label="Telefone" value={str(p, "telefone")} onChange={(v) => set("telefone", v)} />
+            <Field
+              label="CPF"
+              value={str(p, "cpf")}
+              onChange={(v) => set("cpf", v)}
+              placeholder="000.000.000-00"
+            />
             <Field label="Cidade e UF" value={str(p, "cidade")} onChange={(v) => set("cidade", v)} />
             <Field
               label="Título profissional"
@@ -289,6 +295,12 @@ export function ProfileScreen({ cfg }: { cfg: UseConfig }) {
               value={str(p, "regra_localizacao")}
               rows={3}
               onChange={(v) => set("regra_localizacao", v)}
+            />
+            <ChipField
+              label="Cidades/regiões para presencial/híbrido"
+              values={lista(p, "localizacoes_presencial_hibrido")}
+              placeholder="Ex.: Contagem, MG"
+              onChange={(v) => set("localizacoes_presencial_hibrido", v)}
             />
             <ChipField
               label="Palavras-chave de busca"

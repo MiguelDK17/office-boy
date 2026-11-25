@@ -6,7 +6,7 @@ import type { Perfil, AgenteConfig } from '../src/types';
 // Perfil minimo para o executor
 function perfilFake(): Perfil {
   return {
-    nome: 'Fulano', email: 'f@e.com', telefone: '(34) 90000-0000',
+    nome: 'Fulano', email: 'f@e.com', telefone: '(34) 90000-0000', cpf: '529.982.247-25',
     linkedin: 'https://linkedin.com/in/f', github: 'https://github.com/f', portfolio: '',
     curriculo_path: './cv.pdf', titulo_profissional: 'Dev', anos_experiencia: 3,
     stack_principal: ['Java', 'React'], resumo_profissional: 'Resumo.',
@@ -64,6 +64,19 @@ describe('executor — guard de score (gate deterministico)', () => {
 });
 
 describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
+  it('bloqueia pretensão zero e CPF "a combinar" antes de qualquer envio', async () => {
+    const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: false }));
+    const resp = await executar('confirmar_envio', {
+      url_vaga: 'https://x/dados-invalidos', acao: 'enviar candidatura',
+      plataforma: 'Gupy', titulo_vaga: 'Dev', empresa: 'ACME', score: 8,
+      cpf: 'a combinar', pretensao_salarial: '0',
+    });
+    const dados = JSON.parse(resp) as { permitido: boolean; motivo: string };
+    expect(dados.permitido).toBe(false);
+    expect(dados.motivo).toBe('DADOS_CANDIDATURA_INVALIDOS');
+    expect(verificarJaAplicou('https://x/dados-invalidos')).toBe(false);
+  });
+
   it('em dry-run, confirmar_envio BLOQUEIA o envio', async () => {
     // Cenário: dry-run ligado
     const executar = criarExecutorDeTools(perfilFake(), configFake({ dryRun: true }));
@@ -72,6 +85,7 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
     const resp = await executar('confirmar_envio', {
       url_vaga: 'https://x/dry', acao: 'enviar candidatura',
       plataforma: 'Gupy', titulo_vaga: 'Dev Dry', empresa: 'ACME', score: 8,
+      cpf: '529.982.247-25', pretensao_salarial: 'R$ 8.000',
     });
 
     // Validação: bloqueio explícito
@@ -88,6 +102,7 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
     const resp = await executar('confirmar_envio', {
       url_vaga: 'https://x/prod', acao: 'enviar candidatura',
       plataforma: 'Gupy', titulo_vaga: 'Dev Prod', empresa: 'ACME', score: 8,
+      cpf: '529.982.247-25', pretensao_salarial: 'R$ 8.000',
     });
 
     // Validação
@@ -106,6 +121,7 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
       url_vaga: 'https://x/ok',
       acao: 'enviar candidatura',
       plataforma: 'Gupy', titulo_vaga: 'Dev', empresa: 'ACME', score: 8,
+      cpf: '529.982.247-25', pretensao_salarial: 'R$ 8.000',
     });
 
     expect(resp).toMatch(/JA_APLICOU|já possui candidatura/i);
@@ -122,7 +138,7 @@ describe('executor — trava tecnica de dry-run (confirmar_envio)', () => {
       plataforma: 'Gupy',
       titulo_vaga: `Vaga ${n}`,
       empresa: `Empresa ${n}`,
-      score: 9,
+      score: 9, cpf: '529.982.247-25', pretensao_salarial: 'R$ 8.000',
     });
     const r1 = await executar('confirmar_envio', dados(1));
     const r2 = await executar('confirmar_envio', dados(2));

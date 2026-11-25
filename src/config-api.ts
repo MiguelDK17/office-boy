@@ -695,7 +695,7 @@ export async function rotearConfig(
     const atual = lerJSON<Record<string, unknown>>(path.join(DIR_CONFIG, 'perfil.json'), {});
     const p = { ...atual, ...(parsed as Record<string, unknown>) } as Record<string, unknown>;
     // Saneia as listas conhecidas (a UI pode mandar string "a, b" de chips)
-    for (const chaveLista of ['stack_principal', 'modelo_trabalho', 'palavras_chave_busca', 'bancos_de_dados', 'metodologias', 'blacklist_empresas', 'blacklist_termos_titulo']) {
+    for (const chaveLista of ['stack_principal', 'modelo_trabalho', 'palavras_chave_busca', 'bancos_de_dados', 'metodologias', 'blacklist_empresas', 'blacklist_termos_titulo', 'localizacoes_presencial_hibrido']) {
       if (chaveLista in p) p[chaveLista] = listaDe(p[chaveLista]);
     }
     if ('anos_experiencia' in p) p.anos_experiencia = Math.max(0, Number(p.anos_experiencia) || 0);
