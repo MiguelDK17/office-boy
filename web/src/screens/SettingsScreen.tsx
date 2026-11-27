@@ -11,7 +11,7 @@
 // Save de .env exige REINICIALIZAÇÃO (dotenv lê uma vez só) — banner amarelo.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CampoEnv, Configuracao, SiteConfig } from "../lib/types";
+import type { CampoEnv, Configuracao, PluginInfo, PluginSettingInfo, SiteConfig } from "../lib/types";
 import type { UseConfig } from "../hooks/useConfig";
 import { alterarSiteAtivo, invalidateTokenConfig, type MotivoSemReinicio } from "../lib/api";
 import {
@@ -29,6 +29,8 @@ import { SiteUrlsDialog } from "../components/SiteUrlsDialog";
 
 type Valores = Record<string, string | number | boolean | null>;
 
+const MAX_ITERACOES_PADRAO = 500;
+
 /** Rótulos humanos; as chaves técnicas ficam apenas no código e no payload. */
 const ROTULOS_ENV: Record<string, { label: string; unit?: string; hint?: string }> = {
   LIMITE_DIARIO: { label: "Limite diário de candidaturas" },
@@ -44,6 +46,7 @@ const ROTULOS_ENV: Record<string, { label: string; unit?: string; hint?: string 
   DELAY_MAX: { label: "Pausa máxima entre ações", unit: "ms" },
   AGENT_LLM_BASE_URL: { label: "Endereço da API" },
   AGENT_LLM_API_KEY: { label: "Chave da API" },
+  MCP_SERVERS_JSON: { label: "Servidores MCP (JSON)", hint: "Cada servidor precisa de name, url, token e allowedTools." },
   AGENT_LLM_MODEL: { label: "Modelo" },
   LLM_AUX_PROVIDER: { label: "Provedor" },
   LLM_AUX_MODEL: { label: "Modelo" },
@@ -52,6 +55,9 @@ const ROTULOS_ENV: Record<string, { label: string; unit?: string; hint?: string 
   OLLAMA_URL: { label: "Endereço local do Ollama" },
   GEMINI_MODEL: { label: "Modelo Gemini de fallback" },
   GEMINI_API_KEY: { label: "Chave Gemini" },
+  REBASE_JOBS_MCP_URL: { label: "Endpoint do Rebase Jobs", hint: "Endpoint MCP usado no Discovery." },
+  REBASE_JOBS_TOKEN: { label: "Token do Rebase Jobs" },
+  REBASE_JOBS_ALLOWED_HOSTS: { label: "Hosts permitidos no Rebase", hint: "Um host por linha ou separado por vírgula." },
   BOT_UI_PORT: { label: "Porta da interface" },
   BOT_NOVNC_PORT: { label: "Porta do navegador remoto" },
   BOT_CDP_PORT: { label: "Porta de depuração do Chrome" },
@@ -60,11 +66,13 @@ const ROTULOS_ENV: Record<string, { label: string; unit?: string; hint?: string 
   CDP_ENDPOINT: { label: "Endpoint do Chrome" },
   TELEGRAM_BOT_TOKEN: { label: "Token do bot do Telegram" },
   TELEGRAM_CHAT_ID: { label: "Identificador da conversa" },
+  TELEGRAM_ATIVO: { label: "Notificações via Telegram" },
   SMTP_HOST: { label: "Servidor de e-mail" },
   SMTP_PORT: { label: "Porta do servidor de e-mail" },
   SMTP_USER: { label: "Usuário do e-mail" },
   SMTP_PASS: { label: "Senha do e-mail" },
   EMAIL_DESTINATARIO: { label: "E-mail de destino" },
+  EMAIL_ATIVO: { label: "Notificações por e-mail" },
   CRON_HORARIO: { label: "Horário da execução" },
 };
 
@@ -74,7 +82,21 @@ const ROTULOS_TOGGLE: Record<string, { label: string; descricao: string }> = {
   PAUSAR_EM_LOGIN: { label: "Pausar ao detectar login", descricao: "O bot para e espera você entrar na conta." },
   CONTROL_MODE: { label: "Modo de controle", descricao: "Inicia somente o dashboard, sem executar o agente." },
   CRON_ATIVO: { label: "Agendamento automático", descricao: "Executa o bot no horário definido." },
+  REBASE_JOBS_ENABLED: { label: "Usar Rebase Jobs", descricao: "Habilita o catálogo de vagas via MCP." },
+  REBASE_JOBS_ALLOW_EXTERNAL_APPLY: { label: "Permitir candidaturas externas", descricao: "Libera o envio para hosts autorizados do Rebase." },
+  TELEGRAM_ATIVO: { label: "Notificações via Telegram", descricao: "Ativa ou desativa todas as notificações enviadas ao Telegram." },
+  EMAIL_ATIVO: { label: "Notificações por e-mail", descricao: "Ativa ou desativa todas as notificações enviadas por e-mail." },
 };
+
+const CHAVES_REBASE = new Set([
+  "REBASE_JOBS_ENABLED",
+  "REBASE_JOBS_MCP_URL",
+  "REBASE_JOBS_TOKEN",
+  "REBASE_JOBS_ALLOW_EXTERNAL_APPLY",
+  "REBASE_JOBS_ALLOWED_HOSTS",
+]);
+
+const CHAVES_MCP = new Set(["MCP_SERVERS_JSON", ...CHAVES_REBASE]);
 
 /** Valor inicial de um campo ("" para secret — nunca pré-preenchido). */
 function inicial(campo: CampoEnv): string | number | boolean | null {
@@ -108,6 +130,10 @@ export function SettingsScreen({
   const [siteUrlsOpen, setSiteUrlsOpen] = useState<string | null>(null);
   const [salvandoSiteId, setSalvandoSiteId] = useState<string | null>(null);
   const [siteAviso, setSiteAviso] = useState<{ tipo: "erro" | "ok"; texto: string } | null>(null);
+  const [pluginAviso, setPluginAviso] = useState<string | null>(null);
+  const [pluginOcupado, setPluginOcupado] = useState<string | null>(null);
+  const [pluginDrafts, setPluginDrafts] = useState<Record<string, Record<string, string | number | boolean>>>({});
+  const [canalNotificacao, setCanalNotificacao] = useState<"telegram" | "email">("telegram");
   // Última versão PERSISTIDA dos sites (inclui gravações diretas do dialog e
   // do toggle). O "Descartar" e o cálculo de dirty usam esta base, não o
   // cfg.config — que fica velho depois de um save direto.
@@ -183,6 +209,41 @@ export function SettingsScreen({
 
   const env = cfg.config?.env ?? [];
   const envDisponivel = cfg.config?.envDisponivel ?? false;
+  const plugins = cfg.plugins;
+
+  const canaisConfigurados = useMemo(() => {
+    const campos = new Map(env.map((c) => [c.chave, c]));
+    const preenchido = (chave: string) => {
+      const campo = campos.get(chave);
+      if (!campo) return false;
+      const valorLocal = valores[chave];
+      // Segredos nunca voltam do backend. Se o usuário acabou de digitá-los,
+      // o rascunho local já é evidência suficiente para liberar o canal.
+      if (typeof valorLocal === 'string' && valorLocal.trim().length > 0) return true;
+      return campo.secreto
+        ? campo.definido
+        : String(campo.valor ?? '').trim().length > 0;
+    };
+    return {
+      telegram: ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'].every(preenchido),
+      email: ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_DESTINATARIO'].every(preenchido),
+    };
+  }, [env, valores]);
+
+  useEffect(() => {
+    setPluginDrafts((atual) => {
+      const proximos = { ...atual };
+      for (const plugin of plugins) {
+        if (proximos[plugin.id]) continue;
+        proximos[plugin.id] = Object.fromEntries(
+          plugin.settings
+            .filter((setting) => setting.value !== undefined)
+            .map((setting) => [setting.key, setting.value as string | number | boolean]),
+        );
+      }
+      return proximos;
+    });
+  }, [plugins]);
   const siteAberto = siteUrlsOpen
     ? siteStates.find((site) => site.id === siteUrlsOpen) ?? null
     : null;
@@ -273,7 +334,18 @@ export function SettingsScreen({
         const n = Number(valor);
         if (Number.isFinite(n) && n === Number(original)) continue;
       } else if (valor === original || valor === String(original ?? "")) continue;
-      if (valor === null || valor === "") continue; // vazio = não tocar
+      if (valor === null || valor === "") {
+        // Neste campo, vazio significa restaurar o padrão documentado — não
+        // ignorar a alteração e recarregar silenciosamente o valor antigo.
+        if (campo.chave === "MAX_ITERACOES") {
+          const padrao = String(MAX_ITERACOES_PADRAO);
+          if (String(original ?? "") !== padrao) {
+            envPayload[campo.chave] = padrao;
+            mudouEnv = true;
+          }
+        }
+        continue;
+      }
       envPayload[campo.chave] =
         campo.tipo === "booleano" ? (valor ? "true" : "false") : String(valor);
       mudouEnv = true;
@@ -323,9 +395,116 @@ export function SettingsScreen({
     if (!vaiReiniciar) await cfg.recarregar();
   }
 
+  async function instalarPluginArquivo(arquivo: File | undefined) {
+    if (!arquivo) return;
+    setPluginAviso(null);
+    setPluginOcupado("install");
+    const erro = await cfg.instalarPlugin(arquivo);
+    setPluginOcupado(null);
+    if (erro) {
+      setPluginAviso(erro);
+      return;
+    }
+    await cfg.recarregarPlugins();
+    setPluginAviso("Plugin instalado e desativado. Revise as tools e ative quando estiver pronto.");
+  }
+
+  async function atualizarPluginArquivo(arquivo: File | undefined) {
+    if (!arquivo) return;
+    setPluginAviso(null);
+    setPluginOcupado("update");
+    const erro = await cfg.atualizarPlugin(arquivo);
+    setPluginOcupado(null);
+    if (erro) setPluginAviso(erro);
+    else {
+      await cfg.recarregarPlugins();
+      setPluginAviso("Plugin atualizado. A configuração existente foi preservada.");
+    }
+  }
+
+  async function alternarPlugin(id: string, enabled: boolean) {
+    setPluginAviso(null);
+    const plugin = plugins.find((item) => item.id === id);
+    const confirmarStdio = enabled && plugin?.connection.transport === "stdio"
+      ? window.confirm(`Este plugin executará o comando local:\n\n${plugin.connection.command ?? "(comando não informado)"}\n\nDeseja continuar?`)
+      : false;
+    if (enabled && plugin?.connection.transport === "stdio" && !confirmarStdio) return;
+    setPluginOcupado(id);
+    const erro = await cfg.configurarPlugin(id, {}, enabled, confirmarStdio);
+    setPluginOcupado(null);
+    if (erro) setPluginAviso(erro);
+    else {
+      await cfg.recarregarPlugins();
+      setPluginAviso("Plugin atualizado. O OfficeBoy será reiniciado para aplicar a alteração.");
+    }
+  }
+
+  async function salvarConfiguracaoPlugin(plugin: PluginInfo) {
+    setPluginAviso(null);
+    setPluginOcupado(`save:${plugin.id}`);
+    const erro = await cfg.configurarPlugin(
+      plugin.id,
+      pluginDrafts[plugin.id] ?? {},
+      plugin.enabled,
+      plugin.enabled && plugin.connection.transport === "stdio",
+    );
+    setPluginOcupado(null);
+    if (erro) setPluginAviso(erro);
+    else setPluginAviso("Configuração salva. O OfficeBoy será reiniciado para aplicar o plugin.");
+  }
+
+  function alterarSettingPlugin(pluginId: string, setting: PluginSettingInfo, value: string | number | boolean) {
+    setPluginDrafts((atual) => ({
+      ...atual,
+      [pluginId]: { ...(atual[pluginId] ?? {}), [setting.key]: value },
+    }));
+    if (setting.key === "enabled" && typeof value === "boolean") void alternarPlugin(pluginId, value);
+    if (setting.key !== "enabled" && setting.type === "boolean") {
+      const plugin = plugins.find((item) => item.id === pluginId);
+      if (plugin) void cfg.configurarPlugin(pluginId, { ...(pluginDrafts[pluginId] ?? {}), [setting.key]: value }, plugin.enabled);
+    }
+  }
+
+  function renderSettingPlugin(plugin: PluginInfo, setting: PluginSettingInfo) {
+    const value = pluginDrafts[plugin.id]?.[setting.key] ?? setting.value ?? (setting.type === "boolean" ? false : "");
+    if (setting.type === "boolean") {
+      return (
+        <div className="toggle-field" key={`${plugin.id}:${setting.key}`}>
+          <span><b>{setting.label}</b><small>{setting.hint ?? "Ativar"}</small></span>
+          <Toggle
+            checked={value === true}
+            ariaLabel={setting.label}
+            onChange={(checked) => alterarSettingPlugin(plugin.id, setting, checked)}
+          />
+        </div>
+      );
+    }
+    if (setting.type === "secret") {
+      return (
+        <SecretField
+          key={`${plugin.id}:${setting.key}`}
+          label={setting.label}
+          definido={setting.defined}
+          onChange={(next) => alterarSettingPlugin(plugin.id, setting, next)}
+          onBlur={() => void salvarConfiguracaoPlugin(plugin)}
+        />
+      );
+    }
+    return (
+      <Field
+        key={`${plugin.id}:${setting.key}`}
+        label={setting.label}
+        type={setting.type === "number" ? "number" : "text"}
+        value={String(value)}
+        hint={setting.hint}
+        onChange={(next) => alterarSettingPlugin(plugin.id, setting, setting.type === "number" ? Number(next) : next)}
+        onBlur={() => void salvarConfiguracaoPlugin(plugin)}
+      />
+    );
+  }
+
   const campo = (chave: string): CampoEnv | undefined =>
     env.find((c) => c.chave === chave);
-
   const rotulo = (c: CampoEnv) => ROTULOS_ENV[c.chave] ?? { label: c.chave };
 
   const renderNumero = (c: CampoEnv, hint?: string) => {
@@ -382,17 +561,20 @@ export function SettingsScreen({
   };
   const renderBooleano = (c: CampoEnv, rotuloPadrao = "Ativar") => {
     const r = ROTULOS_TOGGLE[c.chave] ?? { label: rotuloPadrao, descricao: "" };
+    const bloqueadoPorCredenciais =
+      (c.chave === "TELEGRAM_ATIVO" && !canaisConfigurados.telegram) ||
+      (c.chave === "EMAIL_ATIVO" && !canaisConfigurados.email);
     return (
-      <div className="toggle-field" key={c.chave}>
+      <div className={`toggle-field ${bloqueadoPorCredenciais ? "toggle-field-disabled" : ""}`} key={c.chave}>
         <span>
           <b>
             {r.label}
           </b>
-          <small>{r.descricao}</small>
+          <small>{bloqueadoPorCredenciais ? "Configure as credenciais acima para habilitar." : r.descricao}</small>
         </span>
         <Toggle
           checked={valores[c.chave] === true}
-          disabled={c.somenteLeitura}
+          disabled={c.somenteLeitura || bloqueadoPorCredenciais}
           ariaLabel={r.label}
           onChange={(checked) => setCampo(c, checked)}
         />
@@ -499,7 +681,7 @@ export function SettingsScreen({
           <div className="field-grid settings-fields">
             {porGrupo
               .get("agente")
-              ?.filter((c) => c.chave !== "AGENT_LLM_MODEL")
+              ?.filter((c) => !CHAVES_MCP.has(c.chave) && c.chave !== "AGENT_LLM_MODEL")
               .map((c) => renderCampo(c))}
             {/* ModelCombobox: catálogo real do OpenRouter com busca + filtro
                 "somente grátis"; endpoint não-OpenRouter cai em campo manual. */}
@@ -516,6 +698,77 @@ export function SettingsScreen({
           <div className="secret-note">
             <Glyph name="lock" size={15} /> Valores secretos nunca são exibidos nem enviados de volta
           </div>
+        </FormCard>
+
+        <FormCard
+          title="Conexões MCP"
+          description="Servidores MCP remotos conectados ao agente. Configure conexões genéricas e habilite adaptadores especializados quando necessário."
+        >
+          {plugins.length === 0 ? (
+            <div className="plugin-empty-row">
+              <p className="plugin-empty">Nenhum plugin declarativo instalado.</p>
+              <label className="plugin-upload-button">
+                <input
+                  type="file"
+                  accept=".zip,application/zip"
+                  disabled={pluginOcupado === "install"}
+                  onChange={(event) => {
+                    void instalarPluginArquivo(event.target.files?.[0]);
+                    event.currentTarget.value = "";
+                  }}
+                />
+                {pluginOcupado === "install" ? "Instalando…" : "Instalar plugin ZIP"}
+              </label>
+            </div>
+          ) : (
+          <>
+          <div className="plugin-toolbar">
+            <label className="plugin-upload-button">
+              <input
+                type="file"
+                accept=".zip,application/zip"
+                disabled={pluginOcupado === "install"}
+                onChange={(event) => {
+                  void instalarPluginArquivo(event.target.files?.[0]);
+                  event.currentTarget.value = "";
+                }}
+              />
+              {pluginOcupado === "install" ? "Instalando…" : "Instalar plugin ZIP"}
+            </label>
+          </div>
+          <div className="plugin-list" aria-label="Plugins MCP instalados">
+            {plugins.map((plugin) => (
+              <div className="plugin-entry" key={plugin.id}>
+                <div className="plugin-row">
+                  <div className="plugin-row-main">
+                    <div className="plugin-mark" aria-hidden="true">{plugin.name.charAt(0)}</div>
+                    <div>
+                      <strong>{plugin.name}</strong>
+                      <span>{plugin.description}</span>
+                      <small>{plugin.connection.transport} · v{plugin.version} · {plugin.tools.length} tool(s) permitida(s)</small>
+                    </div>
+                  </div>
+                  <div className="plugin-row-actions">
+                    <span className={`plugin-state ${plugin.enabled ? "is-enabled" : ""}`}>{plugin.enabled ? "Ativo" : "Inativo"}</span>
+                    <span className="plugin-state">{plugin.connectionStatus === "connected" ? "Conectado" : plugin.connectionStatus === "ready" ? "Pronto" : plugin.connectionStatus === "invalid" ? "Configuração pendente" : plugin.connectionStatus === "error" ? "Erro de conexão" : "Desconectado"}</span>
+                  </div>
+                </div>
+                <div className="plugin-settings-grid">
+                  {plugin.settings.map((setting) => renderSettingPlugin(plugin, setting))}
+                </div>
+                <div className="plugin-entry-footer">
+                  <span>Tools: {plugin.tools.map((tool) => `${tool.name} (${tool.scope})`).join(" · ")}</span>
+                  <label className="plugin-action">
+                    Atualizar ZIP
+                    <input type="file" accept=".zip,application/zip" hidden disabled={pluginOcupado === "update"} onChange={(event) => { void atualizarPluginArquivo(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+          </>
+          )}
+          {pluginAviso && <p className="plugin-notice" role="status">{pluginAviso}</p>}
         </FormCard>
 
         <FormCard
@@ -560,9 +813,42 @@ export function SettingsScreen({
           </div>
         </FormCard>
 
-        <FormCard title="Notificações" description="Telegram e relatórios por e-mail.">
-          <div className="field-grid settings-fields">
-            {porGrupo.get("notificacoes")?.map((c) => renderCampo(c))}
+        <FormCard title="Notificações" description="Configure os canais que podem enviar avisos do Office Boy.">
+          <div className="notification-channel-switcher" role="tablist" aria-label="Canal de notificações">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={canalNotificacao === "telegram"}
+              aria-controls="notificacoes-telegram"
+              className={canalNotificacao === "telegram" ? "notification-channel-button is-selected" : "notification-channel-button"}
+              onClick={() => setCanalNotificacao("telegram")}
+            >
+              Telegram
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={canalNotificacao === "email"}
+              aria-controls="notificacoes-email"
+              className={canalNotificacao === "email" ? "notification-channel-button is-selected" : "notification-channel-button"}
+              onClick={() => setCanalNotificacao("email")}
+            >
+              E-mail
+            </button>
+          </div>
+
+          <div
+            id={canalNotificacao === "telegram" ? "notificacoes-telegram" : "notificacoes-email"}
+            className="notification-channel-panel"
+            role="tabpanel"
+            aria-label={canalNotificacao === "telegram" ? "Configurações do Telegram" : "Configurações de e-mail"}
+          >
+            {porGrupo
+              .get("notificacoes")
+              ?.filter((c) => canalNotificacao === "telegram"
+                ? c.chave === "TELEGRAM_BOT_TOKEN" || c.chave === "TELEGRAM_CHAT_ID" || c.chave === "TELEGRAM_ATIVO"
+                : c.chave === "SMTP_HOST" || c.chave === "SMTP_PORT" || c.chave === "SMTP_USER" || c.chave === "SMTP_PASS" || c.chave === "EMAIL_DESTINATARIO" || c.chave === "EMAIL_ATIVO")
+              .map((c) => renderCampo(c))}
           </div>
           <div className="secret-note">
             <Glyph name="lock" size={15} /> Valores secretos nunca são exibidos nem enviados de volta

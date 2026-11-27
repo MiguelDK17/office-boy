@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Chrome + display virtual + VNC (camada única para não deixar resíduos de apt).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       wget gnupg ca-certificates curl \
-      xvfb x11vnc novnc websockify \
+      xvfb x11vnc novnc websockify unzip \
       fonts-liberation \
     && wget -qO- https://dl.google.com/linux/linux_signing_key.pub \
       | gpg --dearmor -o /usr/share/keyrings/google.gpg \
@@ -39,6 +39,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 
 COPY . .
 RUN yarn build
+# O servidor de controle serve o front React a partir de web/dist. O build
+# TypeScript acima gera apenas o backend; sem este passo a imagem reutiliza um
+# bundle antigo (ou cai na UI legada em /legacy).
+RUN npm --prefix web ci --no-audit --no-fund \
+    && npm --prefix web run build \
+    && rm -rf web/node_modules
 
 # Binário do MCP pré-instalado — o mcp-client.ts prefere este caminho
 # (PLAYWRIGHT_MCP_BIN) e só cai para `npx` (download) como fallback.

@@ -16,6 +16,12 @@ data/
 # Ambiente
 .env
 
+# Plugins instalados localmente (o plugin oficial é versionado)
+plugins/*/
+!plugins/rebase-jobs/
+!plugins/rebase-jobs/manifest.json
+plugins/.state.json
+
 # MCP / runtime
 .playwright-mcp/
 

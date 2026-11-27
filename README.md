@@ -22,6 +22,7 @@ O bot navega por portais de vagas (Gupy, Catho, LinkedIn, Indeed), analisa cada 
 |---|---|
 | **AI Agent (OpenRouter)** | Modelo configurável via OpenRouter (DeepSeek, Llama, Gemini Flash, Qwen...) — sem lock-in de provedor |
 | **Playwright MCP** | Controla o Chrome real do usuário via CDP — reaproveita a sessão já logada |
+| **Rebase Jobs MCP** | Fonte opcional de vagas estruturadas; reduz navegação para descoberta e triagem |
 | **Tailored Resume** | Gera currículo personalizado por vaga via IA — destaca skills relevantes, converte HTML→PDF |
 | **Cover Letter** | Gera carta de apresentação personalizada por vaga com validação anti-fabricação |
 | **Answer Cache** | Cacheia respostas de formulário no SQLite — economiza tokens e acelera execuções futuras |
@@ -75,7 +76,7 @@ O bot navega por portais de vagas (Gupy, Catho, LinkedIn, Indeed), analisa cada 
 └─────────────────────────────────────────────────┘
 ```
 
-**Stack:** TypeScript · OpenRouter (SDK OpenAI) · Playwright MCP · SQLite · Node.js · Docker · Multi-LLM (Ollama/Gemini)
+**Stack:** TypeScript · OpenRouter (SDK OpenAI) · Playwright MCP · Rebase Jobs MCP · SQLite · Node.js · Docker · Multi-LLM (Ollama/Gemini)
 
 ---
 
@@ -134,6 +135,20 @@ npm start
 ```
 
 Com `CONTROL_MODE=true` no `.env`, o processo sobe **só a UI** (dashboard) e o agente espera você apertar "Iniciar bot" — nenhuma cota é gasta até lá. É o padrão do Docker.
+
+### Discovery e Apply
+
+O fluxo pode ser separado em duas etapas:
+
+```bash
+# Busca no Rebase Jobs, aplica scoring/blacklist e grava a fila local — não abre Chrome
+npm run discover
+
+# Processa somente as vagas pendentes da fila usando o Chrome e o fluxo normal
+npm run apply
+```
+
+No modo control server, a mesma separação pode ser acionada pela API: `POST /api/start` com `{"modo":"discovery"}` ou `{"modo":"apply"}`. O modo `apply` continua exigindo Chrome, mas não precisa consultar o Rebase novamente.
 
 ### 5b. Via Docker (alternativa — pilha completa)
 
@@ -251,9 +266,35 @@ Detalhes que importam:
 | `AGENT_LLM_BASE_URL` | Base URL do LLM do agente (OpenRouter, OpenAI, Ollama, vLLM...) | `https://openrouter.ai/api/v1` |
 | `AGENT_LLM_API_KEY` | Chave do provedor do agente | *obrigatório* |
 | `AGENT_LLM_MODEL` | Modelo do agente (qualquer um do OpenRouter com tool calling) | `deepseek/deepseek-v4-flash-0731` |
+| `MCP_SERVERS_JSON` | Servidores MCP remotos genéricos; cada item define `name`, `url`, `token` e `allowedTools` | `[]` |
+| `REBASE_JOBS_ENABLED` | Habilita a fonte complementar de vagas via MCP | `false` |
+| `REBASE_JOBS_MCP_URL` | Endpoint oficial do Rebase Jobs MCP | `https://rebasedev.com.br/mcp` |
+| `REBASE_JOBS_TOKEN` | Token pessoal Bearer do Rebase Jobs | *opcional* |
+| `REBASE_JOBS_ALLOW_EXTERNAL_APPLY` | Autoriza candidaturas da fila em domínios externos | `false` |
+| `REBASE_JOBS_ALLOWED_HOSTS` | Allowlist de hosts externos, separados por vírgula | *vazio* |
 | `CDP_ENDPOINT` | Endpoint CDP do Chrome (use `127.0.0.1`, não `localhost`, p/ evitar `ECONNREFUSED ::1`) | `http://127.0.0.1:9222` |
 | `BOT_UI_PORT` | Porta da UI/control server no host (Docker) | `1717` |
 | `BOT_CDP_PORT` | Porta CDP do Chrome do host (usada pelo modo host) | `9222` |
+
+O OfficeBoy aceita servidores MCP remotos genéricos via `MCP_SERVERS_JSON`, por exemplo:
+
+```json
+[{"name":"meu-servidor","url":"https://exemplo.com/mcp","token":"TOKEN","allowedTools":["buscar_dados"]}]
+```
+
+O token é enviado como Bearer e `allowedTools` é obrigatória para impedir que um servidor remoto exponha tools não revisadas ao agente. Rebase Jobs é um adaptador especializado que continua usando `REBASE_JOBS_*` para discovery e fila. Para ativá-lo, autentique-se com LinkedIn em **Agentes e API** no Rebase Jobs, gere um token pessoal e configure `REBASE_JOBS_ENABLED=true` e `REBASE_JOBS_TOKEN` no `.env`.
+
+Por segurança, o modo `apply` bloqueia envios para domínios externos por padrão. Para liberar, use `REBASE_JOBS_ALLOW_EXTERNAL_APPLY=true` ou configure uma lista restrita em `REBASE_JOBS_ALLOWED_HOSTS=empresa1.com,empresa2.com`.
+
+### Plugins MCP declarativos
+
+Plugins instalados pela tela **Configurações → Conexões MCP** ficam em `plugins/` e são instalados inativos. O estado namespaceado (incluindo credenciais, que nunca são devolvidas pela API) fica em `plugins/.state.json`, enquanto `REBASE_JOBS_*` continua sendo aceito como compatibilidade durante a migração.
+
+O ZIP precisa conter `manifest.json` na raiz e somente recursos declarativos (`.json`, `.yaml`, `.yml`, `.toml`, `.md` ou `.txt`). A UI permite instalar, atualizar, configurar, ativar/desativar e remover plugins. Plugins `stdio` exibem o comando local e exigem confirmação explícita antes da ativação.
+
+Tools declaradas com escopo `apply` ficam invisíveis fora do modo `apply` e, mesmo nesse modo, exigem a tool de confirmação `confirmar_tool_mcp_apply` imediatamente antes da execução. A allowlist do manifesto continua sendo aplicada antes da exposição das tools ao agente.
+
+As rotas de plugin estão disponíveis sob `/api/config/plugins` e também pelo alias público `/api/plugins` para listagem, instalação e atualização. Segredos retornam apenas como `defined: true/false`.
 | `CONTROL_MODE` | `true` = container sobe só a UI (o agente roda sob demanda) | `true` |
 | `OFFICEBOY_AUTO_RESTART` | Força o reinício automático ao salvar `.env` fora do Docker (com supervisor). No Docker é detectado sozinho | *detectado* |
 | `DASHBOARD_PORT` | Porta do dashboard web | `3000` |

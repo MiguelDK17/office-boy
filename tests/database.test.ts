@@ -13,6 +13,9 @@ import {
   sanitizarPergunta,
   atualizarResultado,
   listarCandidaturas,
+  inserirVagaNaFila,
+  listarVagasFila,
+  atualizarStatusVagaFila,
 } from '../src/database';
 
 // Diretório de teste propositalmente inexistente, para validar a criação automática.
@@ -118,5 +121,18 @@ describe('database — resultado (loop de feedback)', () => {
   it('retorna false para id inexistente', () => {
     // Cenário + Ação + Validação
     expect(atualizarResultado(999999, 'entrevista')).toBe(false);
+  });
+});
+
+describe('database — fila de discovery/apply', () => {
+  it('insere, lista como pendente e marca uma vaga como aplicada', () => {
+    const url = 'https://empresa.example/jobs/dev-fila-1';
+    expect(inserirVagaNaFila({
+      url, titulo_vaga: 'Backend Developer', empresa: 'Empresa Fila',
+      plataforma: 'Rebase Jobs', descricao: 'Node.js e APIs', score: 8,
+    })).toBe(true);
+    expect(listarVagasFila(10).some(v => v.url === url && v.status === 'pendente')).toBe(true);
+    expect(atualizarStatusVagaFila(url, 'aplicado')).toBe(true);
+    expect(listarVagasFila(10).some(v => v.url === url)).toBe(false);
   });
 });

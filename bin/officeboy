@@ -33,17 +33,20 @@ set -euo pipefail
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJETO_DIR="$(dirname "$(dirname "$SCRIPT_PATH")")"
 cd "$PROJETO_DIR"
-# Carrega o .env sem exportar commented lines.
-if [ -f .env ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . ./.env
-  set +a
-fi
+# Lê somente as portas usadas pelo script. Não fazemos `source .env`: senhas de
+# app e outros valores podem conter espaços ou caracteres que seriam
+# interpretados como shell pelo carregamento direto.
+env_value() {
+  local chave="$1"
+  sed -n "s/^${chave}=//p" .env 2>/dev/null | head -n 1
+}
 
-UI_PORT="${BOT_UI_PORT:-1717}"
-NOVNC_PORT="${BOT_NOVNC_PORT:-7900}"
-CDP_PORT="${BOT_CDP_PORT:-9222}"
+UI_PORT="${BOT_UI_PORT:-$(env_value BOT_UI_PORT)}"
+NOVNC_PORT="${BOT_NOVNC_PORT:-$(env_value BOT_NOVNC_PORT)}"
+CDP_PORT="${BOT_CDP_PORT:-$(env_value BOT_CDP_PORT)}"
+UI_PORT="${UI_PORT:-1717}"
+NOVNC_PORT="${NOVNC_PORT:-7900}"
+CDP_PORT="${CDP_PORT:-9222}"
 COMPOSE=(docker compose)
 
 c() { printf '\033[36m%s\033[0m\n' "$*"; }

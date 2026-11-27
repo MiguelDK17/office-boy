@@ -11,6 +11,7 @@ import { notificarErro, enviarTelegram } from './notificacoes.js';
 import { registrarUsoTokens, obterCustoTotal } from './token-tracker.js';
 import { perfilParaSystemPrompt } from './anonimizacao.js';
 import type { AgenteConfig, Perfil, SitesConfig } from './types.js';
+import type { PluginScope } from './plugin-registry.js';
 import { camposOpenRouter, ehOpenRouter } from './openrouter.js';
 
 /** Mascara qualquer URL em texto livre antes de ir para o log. */
@@ -54,10 +55,29 @@ const RECOVERY_PATH = path.resolve(__dirname, '..', 'data', 'recovery.json');
 
 function buildSystemPrompt(perfil: Perfil, sites: SitesConfig, config: AgenteConfig): string {
   const { limiteDiario, dryRun, scoreMinimo, metaCandidaturas } = config;
+  const rebaseOrientacao = config.rebaseJobsEnabled
+    ? `
+## REBASE JOBS (fonte estruturada complementar)
+- Antes de varrer resultados no navegador, use buscar_vagas para descobrir vagas compatíveis no Rebase Jobs.
+- Use ver_vaga para obter o anúncio completo antes de pontuar uma vaga do Rebase.
+- Trate as vagas do Rebase como candidaturas externas: confirme a URL real de candidatura e use o navegador apenas para abrir, analisar e enviar no site da empresa.
+- Nunca use as tools de acompanhamento, ocultação ou vagas externas do Rebase; elas não foram disponibilizadas neste run.
+`
+    : '';
+  const filaOrientacao = config.modoExecucao === 'apply'
+    ? `
+## MODO APPLY (fila local)
+- Comece obrigatoriamente com listar_vagas_fila.
+- Para cada vaga retornada, navegue DIRETO para a URL da vaga/candidatura; não faça busca em listagens dos portais.
+- Se a fila estiver vazia, encerre informando que não há vagas pendentes.
+`
+    : '';
   return `
 Voce e um agente inteligente de candidatura automatica a vagas de emprego.
 Voce controla um navegador real (Chrome do usuario, ja logado nos sites) atraves das browser tools.
 ${dryRun ? '\n** MODO DRY-RUN ATIVO: faca TODO o processo normalmente (navegar, analisar, preencher formularios) mas NAO envie de verdade. O sistema BLOQUEIA o envio e JA registra a candidatura como dry-run quando voce chama confirmar_envio com todos os dados. **\n' : ''}
+${rebaseOrientacao}
+${filaOrientacao}
 
 ## Seu Objetivo
 Navegar pelos sites configurados, buscar vagas relevantes e se candidatar automaticamente.
@@ -264,6 +284,7 @@ Para CADA campo de formulario, siga esta ordem:
 - SEMPRE use verificar_vaga_ja_vista ANTES de analisar uma vaga em detalhe.
 - Se a vaga ja foi vista (mesmo que nao tenha sido aplicada), PULE para a proxima.
 - Ao PULAR uma vaga (por qualquer motivo), use registrar_vaga_vista para marcar como vista.
+- Ao registrar uma vaga com score 8/10 ou mais, sempre informe em motivo_pulo uma explicação curta e específica da decisão (por exemplo: incompatibilidade entre stack principal e requisito central, senioridade, idioma ou localização). Esse motivo aparece no relatório enviado por email.
 - Isso economiza tempo evitando reanalisar vagas ja descartadas em execucoes anteriores.
 
 ## Regras de Upload de Curriculo (IMPORTANTE)
@@ -387,6 +408,13 @@ export interface McpToolInfo {
   inputSchema?: unknown;
 }
 
+export interface McpServerConnection {
+  name: string;
+  client: Client;
+  readOnlyAllowlist?: ReadonlySet<string>;
+  toolScopes?: ReadonlyMap<string, PluginScope>;
+}
+
 /**
  * Converte uma tool do Playwright MCP para `ChatCompletionTool` do OpenAI.
  * O `inputSchema` do MCP já é JSON Schema — é repassado intacto como
@@ -508,8 +536,12 @@ export async function executarAgente(
   sites: SitesConfig,
   config: AgenteConfig,
   sitesBloqueados: string[] = [],
+  mcpServers: McpServerConnection[] = [{ name: 'playwright', client: mcpClient }],
 ): Promise<string> {
   const client = criarClientAgente(config);
+  const rebaseJobsDisponivel = config.rebaseJobsEnabled
+    && mcpServers.some(servidor => servidor.name === 'rebase-jobs');
+  const configPrompt = { ...config, rebaseJobsEnabled: rebaseJobsDisponivel };
   // Sinalizador que o executor de tools seta quando a meta de qualidade é
   // atingida — o loop checa em cada fronteira de iteração (100% determinístico).
   const sinais = { metaAtingida: false };
@@ -521,18 +553,28 @@ export async function executarAgente(
   // navega até eles de qualquer jeito.
   const bloqueados = new Set(sitesBloqueados.map(n => n.toLowerCase()));
   const sitesAtivos = sites.sites.filter(s => s.ativo && !bloqueados.has(s.nome.toLowerCase()));
-  if (sitesAtivos.length === 0) {
+  if (sitesAtivos.length === 0 && config.modoExecucao !== 'apply') {
     return 'Nenhum site ativo com sessão válida. Faça login manual no Chrome do bot e tente novamente.';
   }
   if (bloqueados.size > 0) {
     log('AGENTE', `Sites ignorados (sessão inválida): ${[...bloqueados].join(', ')}`);
   }
-  const systemPrompt = buildSystemPrompt(perfil, { ...sites, sites: sitesAtivos }, config);
+  const systemPrompt = buildSystemPrompt(perfil, { ...sites, sites: sitesAtivos }, configPrompt);
   // Mesma lista em forma de domínio para a barreira determinística do executor.
   const dominiosBloqueados = sites.sites
     .filter(s => bloqueados.has(s.nome.toLowerCase()) && s.urls_busca.length > 0)
     .map(s => {
       try { return new URL(s.urls_busca[0]).hostname.toLowerCase(); } catch { return ''; }
+    })
+    .filter(Boolean);
+  // Barreira determinística: um site desmarcado na configuração não pode ser
+  // acessado apenas porque o modelo decidiu navegar para uma URL conhecida.
+  // A lista de sites no prompt é orientação; esta lista é a proteção efetiva.
+  const dominiosInativos = sites.sites
+    .filter(site => !site.ativo)
+    .flatMap(site => site.urls_busca)
+    .map(url => {
+      try { return new URL(url).hostname.toLowerCase(); } catch { return ''; }
     })
     .filter(Boolean);
   const executarTool = criarExecutorDeTools(perfil, config, sinais, dominiosBloqueados);
@@ -543,11 +585,24 @@ export async function executarAgente(
   log('AGENTE', `Meta de qualidade: ${config.metaCandidaturas > 0 ? `${config.metaCandidaturas} candidatura(s) — encerra o run com sucesso` : 'off (só teto/custo encerram)'}`);
   log('AGENTE', `LLM: ${config.agentLlmModel} via ${config.agentLlmBaseUrl}`);
 
-  // Descobre as tools do Playwright MCP UMA vez e converte para o padrão
-  // OpenAI — o loop abaixo só despacha tool_calls contra este array.
-  const { tools: mcpTools } = await mcpClient.listTools();
-  const tools = montarToolsAgente(mcpTools as McpToolInfo[]);
-  log('AGENTE', `${mcpTools.length} tool(s) MCP + ${customTools.length} customizada(s)`);
+  // Descobre as tools de todos os servidores MCP uma vez. O primeiro servidor
+  // vence colisões de nome; o Playwright é sempre registrado primeiro.
+  const toolsPorNome = new Map<string, { tool: McpToolInfo; client: Client; scope?: PluginScope }>();
+  const mcpApplyConfirmadas = new Set<string>();
+  for (const servidor of mcpServers) {
+    const { tools: listados } = await servidor.client.listTools();
+    for (const tool of listados as McpToolInfo[]) {
+      if (servidor.readOnlyAllowlist && !servidor.readOnlyAllowlist.has(tool.name)) continue;
+      const scope = servidor.toolScopes?.get(tool.name);
+      if (scope === 'apply' && config.modoExecucao !== 'apply') continue;
+      if (!TOOLS_MCP_BLOQUEADAS.has(tool.name) && !toolsPorNome.has(tool.name)) {
+        toolsPorNome.set(tool.name, { tool, client: servidor.client, scope });
+      }
+    }
+    log('AGENTE', `${listados.length} tool(s) MCP descobertas em ${servidor.name}`);
+  }
+  const tools = montarToolsAgente([...toolsPorNome.values()].map(v => v.tool));
+  log('AGENTE', `${toolsPorNome.size} tool(s) MCP + ${customTools.length} customizada(s)`);
 
   // Historico de mensagens para manter contexto entre iteracoes.
   // É `let` porque o sliding window (podarHistorico) substitui o array por uma
@@ -569,7 +624,11 @@ export async function executarAgente(
 
   // Mensagem inicial que dispara o agente
   const mensagemInicial = (`
-Inicie o processo de candidatura. Comece pelo primeiro site da lista.
+Inicie o processo de candidatura. ${configPrompt.modoExecucao === 'apply'
+  ? 'Primeiro use listar_vagas_fila e processe somente as vagas pendentes da fila. '
+  : configPrompt.rebaseJobsEnabled
+    ? 'Primeiro use buscar_vagas e ver_vaga no Rebase Jobs para descobrir e selecionar vagas; depois processe os sites e abra o navegador apenas para as vagas selecionadas. '
+    : 'Comece pelo primeiro site da lista. '}
 Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respostas.
 ` + avisoRecovery).trim();
 
@@ -773,7 +832,16 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
 
         // Rastreia a última URL pedida — o guard de login usa para mandar o
         // agente voltar exatamente à página que estava processando.
+        let navegacaoPortalInativo = false;
         if (toolName === 'browser_navigate' && typeof toolArgs.url === 'string') {
+          try {
+            const host = new URL(toolArgs.url).hostname.toLowerCase();
+            navegacaoPortalInativo = dominiosInativos.some(domain => host === domain || host.endsWith(`.${domain}`));
+          } catch {
+            // A própria tool MCP tratará URLs malformadas.
+          }
+        }
+        if (toolName === 'browser_navigate' && typeof toolArgs.url === 'string' && !navegacaoPortalInativo) {
           ultimaUrlNavegada = toolArgs.url;
         }
 
@@ -782,7 +850,10 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
         // try/catch por tool: uma tool que lança NÃO derruba as demais nem o
         // agente — vira um resultado de erro que o modelo consegue tratar.
         try {
-          if (TOOLS_MCP_BLOQUEADAS.has(toolName)) {
+          if (navegacaoPortalInativo) {
+            resultado = 'NAVEGACAO_BLOQUEADA: este portal está desativado nas configurações. Continue somente nos sites ativos configurados.';
+            log('AGENTE', `Navegação bloqueada para portal inativo: ${mascararTexto(String(toolArgs.url))}`);
+          } else if (TOOLS_MCP_BLOQUEADAS.has(toolName)) {
             // O modelo pode alucinar uma tool bloqueada (nem está no array de
             // tools que ele recebe). Responde com orientação em vez de executar:
             // fechar aba/navegador encerraria o Chrome do usuário (janela real).
@@ -790,17 +861,45 @@ Lembre-se: use aguardar entre cada acao, verifique duplicatas, e varie as respos
               'Tool bloqueada: este agente NAO fecha abas nem o navegador (browser_close/browser_tabs). ' +
               'Deixe as abas abertas e siga o fluxo — para trocar de pagina use browser_navigate na mesma aba.';
             log('AGENTE', `Tool ${toolName} bloqueada (protecao do Chrome do usuario)`);
+          } else if (toolName === 'confirmar_tool_mcp_apply') {
+            const plugin = typeof toolArgs.plugin === 'string' ? toolArgs.plugin : '';
+            const tool = typeof toolArgs.tool === 'string' ? toolArgs.tool : '';
+            const servidorConfirmado = [...toolsPorNome.entries()].find(([nome, valor]) => nome === tool && valor.scope === 'apply' && mcpServers.some(servidor => servidor.name === plugin && servidor.client === valor.client));
+            if (!servidorConfirmado) {
+              resultado = 'CONFIRMACAO_MCP_APPLY_INVALIDA: plugin ou tool não corresponde a uma tool apply registrada.';
+            } else {
+              mcpApplyConfirmadas.add(`${plugin}:${tool}`);
+              resultado = `CONFIRMADO: a tool MCP apply ${plugin}/${tool} poderá ser executada uma vez nesta execução.`;
+            }
           } else if (ehToolCustomizada(toolName)) {
             resultado = await executarTool(toolName, toolArgs);
           } else {
-            // Tool do Playwright MCP — executa via mcpClient
-            const mcpResult = await mcpClient.callTool({
-              name: toolName,
-              arguments: toolArgs,
-            });
+            const servidorTool = toolsPorNome.get(toolName);
+            if (!servidorTool) throw new Error(`Tool MCP nao registrada: ${toolName}`);
+            if (servidorTool.scope === 'apply') {
+              const plugin = mcpServers.find(servidor => servidor.client === servidorTool.client)?.name ?? '';
+              const chave = `${plugin}:${toolName}`;
+              if (!mcpApplyConfirmadas.delete(chave)) {
+                resultado = 'TOOL_APPLY_BLOQUEADA: chame confirmar_tool_mcp_apply imediatamente antes desta execução.';
+                log('AGENTE', `Tool MCP apply bloqueada sem confirmação: ${chave}`);
+              } else {
+                const mcpResult = await servidorTool.client.callTool({
+                  name: toolName,
+                  arguments: toolArgs,
+                });
 
-            const content = (mcpResult as { content?: unknown }).content;
-            resultado = extrairTextoMcp(content);
+                const content = (mcpResult as { content?: unknown }).content;
+                resultado = extrairTextoMcp(content);
+              }
+            } else {
+              const mcpResult = await servidorTool.client.callTool({
+                name: toolName,
+                arguments: toolArgs,
+              });
+
+              const content = (mcpResult as { content?: unknown }).content;
+              resultado = extrairTextoMcp(content);
+            }
           }
         } catch (toolError) {
           resultado = `ERRO_TOOL: ${toolError instanceof Error ? toolError.message : String(toolError)}`;

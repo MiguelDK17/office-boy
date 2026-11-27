@@ -622,6 +622,46 @@ main.with-expanded-terminal {
   padding-top: 20px;
 }
 
+.mode-field {
+  min-width: min(100%, 330px);
+  display: grid;
+  gap: 5px;
+}
+
+.mode-field > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mode-field select {
+  min-height: 34px;
+  padding: 0 30px 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface-soft);
+  font: inherit;
+  font-size: 12px;
+}
+
+.mode-field select:focus-visible {
+  outline: 2px solid color-mix(in srgb, #10b981 55%, transparent);
+  outline-offset: 2px;
+}
+
+.mode-field select:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.mode-field small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .switch-label {
   gap: 10px;
 }
@@ -751,6 +791,7 @@ main.with-expanded-terminal {
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
+  flex-wrap: wrap;
   transition:
     max-height 250ms ease,
     opacity 180ms ease,
@@ -760,11 +801,15 @@ main.with-expanded-terminal {
 }
 
 .advanced-visible {
-  max-height: 110px;
+  max-height: 260px;
   opacity: 1;
   margin-top: 18px;
   padding-top: 18px;
   border-color: var(--border);
+}
+
+.advanced-mode-field {
+  flex: 1 1 100%;
 }
 
 .advanced-options > div:first-child {
@@ -2026,6 +2071,64 @@ main.with-expanded-terminal {
   background: var(--surface-soft);
 }
 
+.notification-channel-switcher {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: min(100%, 320px);
+  padding: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: 13px;
+  background: var(--surface-soft);
+}
+
+.notification-channel-button {
+  min-height: 42px;
+  padding: 0 22px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  transition: 180ms ease;
+}
+
+.notification-channel-button:hover,
+.notification-channel-button:focus-visible {
+  color: var(--text);
+}
+
+.notification-channel-button.is-selected {
+  color: #087d6b;
+  background: var(--surface-solid);
+  box-shadow: 0 4px 12px rgba(20, 85, 75, 0.08);
+}
+
+.notification-channel-button:focus-visible {
+  outline: 3px solid rgba(20, 184, 166, 0.42);
+  outline-offset: 2px;
+}
+
+.notification-channel-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px;
+  margin-top: 18px;
+}
+
+.notification-channel-panel > .toggle-field {
+  grid-column: 1 / -1;
+}
+
+/* Compatibilidade com o layout antigo do card. */
+.notification-channel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px;
+  margin-top: 15px;
+}
+
 .toggle-field > span {
   display: grid;
   gap: 3px;
@@ -2039,6 +2142,20 @@ main.with-expanded-terminal {
 .toggle-field small {
   color: var(--muted);
   font-size: 8px;
+}
+
+.toggle-field-disabled {
+  opacity: 0.68;
+}
+
+.toggle-field-disabled .setting-toggle {
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .notification-channel-panel {
+    grid-template-columns: 1fr;
+  }
 }
 
 .setting-toggle {
@@ -2677,6 +2794,313 @@ dialog.site-urls-dialog[open] {
   margin-top: 7px;
   font-size: 14px;
   line-height: 1.55;
+}
+
+.mcp-connection-summary {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 14px 16px;
+  border: 1px solid rgba(14, 166, 136, 0.2);
+  border-radius: 14px;
+  background: rgba(20, 184, 166, 0.06);
+}
+
+.plugin-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 14px;
+}
+
+.plugin-empty-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 42px;
+}
+
+.plugin-upload-button,
+.plugin-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(14, 166, 136, 0.28);
+  border-radius: 9px;
+  color: #087d6b;
+  background: rgba(20, 184, 166, 0.07);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.plugin-upload-button:hover,
+.plugin-action:hover:not(:disabled) {
+  background: rgba(20, 184, 166, 0.13);
+}
+
+.plugin-upload-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.plugin-action:disabled,
+.plugin-upload-button:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.plugin-list {
+  display: grid;
+  gap: 10px;
+}
+
+.plugin-entry {
+  display: grid;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.plugin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 14px;
+  padding: 0;
+}
+
+.plugin-row-main,
+.plugin-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.plugin-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 20px;
+  padding-top: 4px;
+}
+
+.plugin-entry-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.plugin-entry-footer > span {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.plugin-row-main {
+  min-width: 0;
+}
+
+.plugin-row-main > div:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.plugin-row-main strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.plugin-row-main span,
+.plugin-row-main small,
+.plugin-empty,
+.plugin-notice {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.plugin-row-main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-row-main small {
+  color: var(--faint);
+}
+
+.plugin-mark {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  color: #087d6b;
+  background: rgba(20, 184, 166, 0.14);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.plugin-state {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.plugin-state.is-enabled {
+  color: #07826c;
+}
+
+.plugin-empty,
+.plugin-notice {
+  margin: 0 0 14px;
+}
+
+.plugin-empty-row .plugin-empty {
+  margin: 0;
+}
+
+@media (max-width: 520px) {
+  .plugin-empty-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+.plugin-notice {
+  color: #087d6b;
+}
+
+.mcp-connection-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  color: #087d6b;
+  background: rgba(20, 184, 166, 0.14);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.mcp-connection-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.mcp-connection-copy strong,
+.mcp-adapter-heading strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.mcp-connection-copy span,
+.mcp-adapter-heading span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mcp-status-badge,
+.mcp-adapter-tag {
+  margin-left: auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.mcp-status-badge.is-configured {
+  color: #07826c;
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.mcp-generic-fields {
+  margin-top: 18px;
+}
+
+.mcp-adapter-section {
+  margin-top: 25px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border);
+}
+
+.mcp-adapter-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.mcp-adapter-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.mcp-adapter-tag {
+  color: #087d6b;
+  background: rgba(20, 184, 166, 0.09);
+}
+
+@media (max-width: 600px) {
+  .mcp-connection-summary {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .mcp-status-badge {
+    margin-left: 47px;
+  }
+
+  .plugin-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .plugin-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .plugin-entry-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .plugin-row-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 760px) {
+  .plugin-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .plugin-entry-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 .tab-form-screen .field-grid {

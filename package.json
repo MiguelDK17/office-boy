@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
+    "discover": "OFFICEBOY_MODE=discovery tsx src/index.ts",
+    "apply": "OFFICEBOY_MODE=apply tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "ui": "CONTROL_MODE=true DASHBOARD_PORT=${BOT_UI_PORT:-1717} tsx src/index.ts",
     "ui:dev": "CONTROL_MODE=true DASHBOARD_ENABLED=false DASHBOARD_PORT=${BOT_UI_PORT:-1717} tsx src/index.ts",

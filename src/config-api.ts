@@ -16,13 +16,14 @@
 import http from 'http';
 import dotenv from 'dotenv';
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, rmSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { garantirIdsSites } from './site-ids.js';
 import { origemLocalPermitida } from './local-origin.js';
 import { validarUrls } from './url-validation.js';
 import { log } from './logger.js';
+import { atualizarPluginZip, instalarPluginZip, listarPlugins, obterPlugin, persistirPluginConfig, type PluginSetting } from './plugin-registry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Diretórios sobrescrevíveis via OFFICEBOY_DATA_DIR — usados pelos testes de
@@ -64,6 +65,14 @@ const CAMPOS_ENV: CampoEnv[] = [
   { chave: 'AGENT_LLM_BASE_URL', tipo: 'texto', grupo: 'agente' },
   { chave: 'AGENT_LLM_MODEL', tipo: 'texto', grupo: 'agente' },
   { chave: 'AGENT_LLM_API_KEY', tipo: 'texto', secreto: true, grupo: 'agente' },
+  // Servidores MCP remotos genéricos; o JSON e os tokens nunca são devolvidos.
+  { chave: 'MCP_SERVERS_JSON', tipo: 'texto', secreto: true, grupo: 'agente' },
+  // Compatibilidade com o adaptador de descoberta do Rebase Jobs.
+  { chave: 'REBASE_JOBS_ENABLED', tipo: 'booleano', grupo: 'agente' },
+  { chave: 'REBASE_JOBS_MCP_URL', tipo: 'texto', grupo: 'agente' },
+  { chave: 'REBASE_JOBS_TOKEN', tipo: 'texto', secreto: true, grupo: 'agente' },
+  { chave: 'REBASE_JOBS_ALLOW_EXTERNAL_APPLY', tipo: 'booleano', grupo: 'agente' },
+  { chave: 'REBASE_JOBS_ALLOWED_HOSTS', tipo: 'texto', grupo: 'agente' },
   // LLM auxiliar (currículo/cover letter/mensagem)
   { chave: 'LLM_AUX_PROVIDER', tipo: 'texto', grupo: 'auxiliar' },
   { chave: 'LLM_AUX_MODEL', tipo: 'texto', grupo: 'auxiliar' },
@@ -88,11 +97,13 @@ const CAMPOS_ENV: CampoEnv[] = [
   // Notificações
   { chave: 'TELEGRAM_BOT_TOKEN', tipo: 'texto', secreto: true, grupo: 'notificacoes' },
   { chave: 'TELEGRAM_CHAT_ID', tipo: 'texto', secreto: true, grupo: 'notificacoes' },
+  { chave: 'TELEGRAM_ATIVO', tipo: 'booleano', grupo: 'notificacoes' },
   { chave: 'SMTP_HOST', tipo: 'texto', grupo: 'notificacoes' },
   { chave: 'SMTP_PORT', tipo: 'numero', grupo: 'notificacoes' },
   { chave: 'SMTP_USER', tipo: 'texto', grupo: 'notificacoes' },
   { chave: 'SMTP_PASS', tipo: 'texto', secreto: true, grupo: 'notificacoes' },
   { chave: 'EMAIL_DESTINATARIO', tipo: 'texto', grupo: 'notificacoes' },
+  { chave: 'EMAIL_ATIVO', tipo: 'booleano', grupo: 'notificacoes' },
   // Agendamento
   { chave: 'CRON_ATIVO', tipo: 'booleano', grupo: 'cron' },
   { chave: 'CRON_HORARIO', tipo: 'texto', grupo: 'cron' },
@@ -313,14 +324,17 @@ function validarCurriculos(corpo: unknown): {
  * meio), então não há interleaving dentro do processo. O risco residual é
  * crash DO PROCESSO entre truncate e write; aceito e documentado.
  */
-function atualizarEnv(valores: Record<string, string>): { ok: boolean; motivo?: string } {
+export function atualizarEnv(valores: Record<string, string>, extras: PluginSetting[] = []): { ok: boolean; motivo?: string } {
   if (!existsSync(ARQ_ENV)) {
     return { ok: false, motivo: 'Arquivo .env não encontrado neste ambiente (no container ele é injetado pelo docker compose — edite o .env do host e reinicie).' };
   }
   const linhas = readFileSync(ARQ_ENV, 'utf-8').split('\n');
   const pendentes = new Map<string, string>();
   for (const [chave, valor] of Object.entries(valores)) {
-    const campo = CAMPOS_ENV.find(c => c.chave === chave);
+    const encontrado = CAMPOS_ENV.find(c => c.chave === chave) ?? extras.find(c => c.envKey === chave);
+    const campo = encontrado && 'envKey' in encontrado
+      ? { chave, tipo: 'texto' as TipoEnv, secreto: encontrado.type === 'secret', somenteLeitura: false }
+      : encontrado;
     if (!campo) return { ok: false, motivo: `Chave fora da whitelist: ${chave}` };
     if (campo.somenteLeitura) return { ok: false, motivo: `${chave} é somente leitura (definida no docker compose)` };
     if (campo.secreto && String(valor).trim() === '') continue; // secreto vazio = mantém o atual
@@ -548,6 +562,34 @@ export function lerCorpo(req: http.IncomingMessage, limite = 100_000): Promise<s
   });
 }
 
+function pluginPublico(plugin: ReturnType<typeof listarPlugins>[number]): Record<string, unknown> {
+  return {
+    id: plugin.manifest.id,
+    version: plugin.manifest.version,
+    name: plugin.manifest.name,
+    description: plugin.manifest.description,
+    connection: {
+      transport: plugin.manifest.connection.transport,
+      url: plugin.manifest.connection.url,
+      authentication: plugin.manifest.connection.authentication,
+      ...(plugin.manifest.connection.command ? { command: plugin.manifest.connection.command } : {}),
+    },
+    enabled: plugin.enabled,
+    configured: plugin.configured,
+    connectionStatus: plugin.connectionStatus,
+    settings: plugin.settings.map(setting => ({
+      key: setting.key,
+      label: setting.label,
+      type: setting.type,
+      hint: setting.hint,
+      required: setting.required,
+      defined: setting.defined,
+      ...(setting.type !== 'secret' && setting.value !== undefined ? { value: setting.value } : {}),
+    })),
+    tools: plugin.manifest.tools,
+  };
+}
+
 /** Roteia /api/config*. Devolve false se o caminho não for desta API. */
 export async function rotearConfig(
   req: http.IncomingMessage,
@@ -555,6 +597,9 @@ export async function rotearConfig(
   caminho: string,
   opts: { rodando: () => boolean } = { rodando: () => false },
 ): Promise<boolean> {
+  // Alias público do contrato de plugins; a UI interna mantém o prefixo
+  // /api/config para preservar compatibilidade com as demais configurações.
+  if (caminho.startsWith('/api/plugins')) caminho = `/api/config${caminho.slice('/api'.length)}`;
   // Estrito: /api/config exato ou /api/config/<rota> — /api/configfoo é 404.
   if (caminho !== '/api/config' && !caminho.startsWith('/api/config/')) return false;
   const metodo = req.method ?? 'GET';
@@ -586,7 +631,13 @@ export async function rotearConfig(
     return true;
   }
 
-  if (metodo !== 'PUT') {
+  if (caminho === '/api/config/plugins' && metodo === 'GET') {
+    responderJSON(res, 200, { plugins: listarPlugins().map(pluginPublico) });
+    return true;
+  }
+
+  const rotaPlugin = caminho.startsWith('/api/config/plugins');
+  if (metodo !== 'PUT' && !(rotaPlugin && (metodo === 'POST' || metodo === 'DELETE'))) {
     // ----- GET /api/config/session: entrega o token ao front da própria UI -----
     // Só devolve quando Host/Origin é local. No modo container exposto (Host
     // remoto), a própria guarda de escrita já bloqueia as gravações — coerente.
@@ -647,6 +698,122 @@ export async function rotearConfig(
       responderJSON(res, 403, { ok: false, mensagem: 'X-Config-Token ausente ou incorreto (defina DASHBOARD_TOKEN no .env)' });
       return true;
     }
+  }
+
+  if (caminho === '/api/config/plugins/install' && metodo === 'POST') {
+    const bruto = await lerCorpo(req, 7_000_000);
+    if (bruto === null) {
+      responderJSON(res, 413, { ok: false, mensagem: 'Plugin maior que 5 MB' });
+      return true;
+    }
+    try {
+      const body = JSON.parse(bruto || '{}') as { zipBase64?: unknown };
+      const plugin = await instalarPluginZip(String(body.zipBase64 ?? ''));
+      responderJSON(res, 201, { ok: true, plugin: pluginPublico(plugin) });
+    } catch (error) {
+      responderJSON(res, 400, { ok: false, mensagem: error instanceof Error ? error.message : 'Falha ao instalar plugin' });
+    }
+    return true;
+  }
+
+  if (caminho === '/api/config/plugins/update' && metodo === 'PUT') {
+    const bruto = await lerCorpo(req, 7_000_000);
+    if (bruto === null) {
+      responderJSON(res, 413, { ok: false, mensagem: 'Plugin maior que 5 MB' });
+      return true;
+    }
+    try {
+      const body = JSON.parse(bruto || '{}') as { zipBase64?: unknown };
+      const plugin = await atualizarPluginZip(String(body.zipBase64 ?? ''));
+      responderJSON(res, 200, { ok: true, plugin: pluginPublico(plugin) });
+    } catch (error) {
+      responderJSON(res, 400, { ok: false, mensagem: error instanceof Error ? error.message : 'Falha ao atualizar plugin' });
+    }
+    return true;
+  }
+
+  const matchPlugin = caminho.match(/^\/api\/config\/plugins\/([a-z0-9][a-z0-9._-]{1,63})$/);
+  if (matchPlugin && (metodo === 'POST' || metodo === 'PUT' || metodo === 'DELETE')) {
+    const id = matchPlugin[1];
+    const plugin = obterPlugin(id);
+    if (!plugin) {
+      responderJSON(res, 404, { ok: false, mensagem: 'Plugin não encontrado' });
+      return true;
+    }
+    if (metodo === 'DELETE') {
+      if (id === 'rebase-jobs') {
+        responderJSON(res, 409, { ok: false, mensagem: 'O plugin oficial do Rebase Jobs não pode ser removido' });
+        return true;
+      }
+      rmSync(plugin.path, { recursive: true, force: true });
+      responderJSON(res, 200, { ok: true, mensagem: 'Plugin removido' });
+      return true;
+    }
+    const bruto = await lerCorpo(req);
+    if (bruto === null) {
+      responderJSON(res, 413, { ok: false, mensagem: 'Configuração maior que 100 KB' });
+      return true;
+    }
+    try {
+      const body = JSON.parse(bruto || '{}') as { values?: Record<string, unknown>; enabled?: unknown; confirmarStdio?: unknown };
+      if (body.enabled === true && plugin.manifest.connection.transport === 'stdio' && body.confirmarStdio !== true) {
+        responderJSON(res, 409, { ok: false, mensagem: 'Ativar plugin stdio exige confirmação explícita do comando local.' });
+        return true;
+      }
+      const valores: Record<string, string> = {};
+      const extras = plugin.manifest.settings;
+      for (const setting of extras) {
+        if (body.values && Object.prototype.hasOwnProperty.call(body.values, setting.key)) {
+          const value = body.values[setting.key];
+          if (setting.type === 'boolean' && typeof value !== 'boolean') throw new Error(`Valor booleano inválido: ${setting.key}`);
+          if (setting.type === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) throw new Error(`Valor numérico inválido: ${setting.key}`);
+          if ((setting.type === 'text' || setting.type === 'secret') && typeof value !== 'string') throw new Error(`Valor textual inválido: ${setting.key}`);
+          valores[setting.envKey] = String(value ?? '');
+        }
+      }
+      if (typeof body.enabled === 'boolean') {
+        const enabled = extras.find(setting => setting.key === 'enabled' || setting.envKey.endsWith('_ENABLED'));
+        if (enabled) valores[enabled.envKey] = String(body.enabled);
+      }
+      if (body.enabled === true && !plugin.configured) {
+        const obrigatorios = plugin.manifest.settings.filter(setting => setting.required);
+        const ausentes = obrigatorios.filter(setting => {
+          const valor = valores[setting.envKey];
+          return !plugin.settings.some(item => item.key === setting.key && item.defined) && (!valor || (setting.type === 'secret' && valor.trim() === ''));
+        });
+        if (ausentes.length > 0) {
+          responderJSON(res, 409, { ok: false, mensagem: `Configuração obrigatória ausente: ${ausentes.map(setting => setting.key).join(', ')}` });
+          return true;
+        }
+      }
+      const pluginValores = Object.fromEntries(Object.entries(body.values ?? {}).flatMap(([key, value]) => {
+        const setting = extras.find(item => item.key === key);
+        return setting ? [[key, setting.type === 'boolean' ? String(value === true) : String(value ?? '')]] : [];
+      }));
+      if (typeof body.enabled === 'boolean') {
+        const enabled = extras.find(setting => setting.key === 'enabled' || setting.envKey.endsWith('_ENABLED'));
+        if (enabled) pluginValores[enabled.key] = String(body.enabled);
+      }
+      const atualizado = persistirPluginConfig(id, pluginValores);
+      const resultado = atualizarEnv(valores, extras);
+      if (!resultado.ok && !resultado.motivo?.includes('Arquivo .env não encontrado')) {
+        responderJSON(res, 409, { ok: false, mensagem: resultado.motivo });
+        return true;
+      }
+      const motivo = motivoSemReinicio(opts.rodando());
+      responderJSON(res, 200, {
+        ok: true,
+        plugin: pluginPublico(atualizado),
+        mensagem: motivo ? 'Configuração salva; será aplicada na próxima inicialização.' : 'Configuração salva. Reiniciando automaticamente…',
+        reiniciando: motivo === null,
+        motivo,
+        bootId: BOOT_ID,
+      });
+      if (motivo === null) agendarReinicio(res);
+    } catch (error) {
+      responderJSON(res, 400, { ok: false, mensagem: error instanceof Error ? error.message : 'Configuração inválida' });
+    }
+    return true;
   }
 
   // ----- PUT /api/config/curriculos/arquivo: upload de PDF/DOC (JSON base64).

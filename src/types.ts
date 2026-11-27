@@ -68,7 +68,39 @@ export interface Candidatura {
   resultado?: string;
 }
 
+export type StatusFilaVaga = 'pendente' | 'processando' | 'aplicado' | 'pulada' | 'erro';
+
+export interface VagaFila {
+  id?: number;
+  url: string;
+  titulo_vaga: string;
+  empresa: string;
+  plataforma: string;
+  descricao?: string;
+  localizacao?: string;
+  score?: number;
+  status: StatusFilaVaga;
+  motivo?: string;
+  data_criacao?: string;
+}
+
+/** Configuração de um servidor MCP remoto genérico. */
+export interface McpServerConfig {
+  name: string;
+  transport?: 'streamable-http' | 'stdio';
+  url?: string;
+  token?: string;
+  command?: string;
+  args?: string[];
+  authentication?: 'bearer' | 'none';
+  enabled?: boolean;
+  /** Obrigatória para evitar expor tools mutáveis sem revisão explícita. */
+  allowedTools?: string[];
+}
+
 export interface AgenteConfig {
+  /** full = descoberta + candidatura, discovery = só fila, apply = só fila pendente. */
+  modoExecucao?: 'full' | 'discovery' | 'apply';
   // LLM do agente de navegação (agnóstico, padrão OpenAI SDK — funciona com
   // OpenRouter, OpenAI nativa, Ollama ou qualquer endpoint OpenAI-compatible).
   agentLlmBaseUrl: string;
@@ -105,12 +137,14 @@ export interface AgenteConfig {
   // Telegram (opcional)
   telegramBotToken: string;
   telegramChatId: string;
+  telegramAtivo: boolean;
   // Email (opcional)
   smtpHost: string;
   smtpPort: number;
   smtpUser: string;
   smtpPass: string;
   emailDestinatario: string;
+  emailAtivo: boolean;
   // Cron (desativado por padrão)
   cronAtivo: boolean;
   cronHorario: string;
@@ -120,6 +154,12 @@ export interface AgenteConfig {
   ollamaUrl: string;
   openaiApiKey: string;
   openaiBaseUrl: string;
+  // Rebase Jobs (fonte complementar de vagas via MCP, opt-in).
+  rebaseJobsEnabled: boolean;
+  rebaseJobsMcpUrl: string;
+  rebaseJobsToken: string;
+  rebaseJobsAllowExternalApply?: boolean;
+  rebaseJobsAllowedHosts?: string[];
   /** ID compartilhado pelas chamadas OpenRouter de uma execução. */
   openRouterSessionId?: string;
 }

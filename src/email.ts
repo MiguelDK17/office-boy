@@ -21,12 +21,19 @@ interface EmailConfig {
 
 let emailConfig: EmailConfig | null = null;
 
-export function configurarEmail(host: string, port: number, user: string, pass: string, destinatario: string): void {
+export function configurarEmail(host: string, port: number, user: string, pass: string, destinatario: string, ativo = true): void {
+  emailConfig = null;
+  if (!ativo) {
+    log('INFO', 'Email: Notificações desativadas pela configuração.');
+    return;
+  }
   if (!host || !user || !pass || !destinatario) {
     log('WARN', 'Email: Configuração SMTP incompleta. Relatórios por email desativados.');
     return;
   }
-  emailConfig = { host, port, user, pass, destinatario };
+  // O Google exibe senhas de app agrupadas com espaços. Eles são apenas
+  // formatação visual e não fazem parte da credencial SMTP.
+  emailConfig = { host, port, user, pass: pass.replace(/\s+/g, ''), destinatario };
   log('INFO', 'Email: Configurado com sucesso.');
 }
 
@@ -72,6 +79,14 @@ export function gerarHTMLRelatorio(dados: {
   erros: string[];
   dryRun: boolean;
   scoresMedio: number;
+  vagasPuloAltoScore?: Array<{
+    titulo_vaga: string;
+    empresa: string;
+    plataforma: string;
+    url: string;
+    score: number;
+    motivo_pulo: string;
+  }>;
 }): string {
   const modo = dados.dryRun ? 'DRY-RUN (simulação)' : 'PRODUÇÃO';
   const listaEmpresas = dados.empresas.length > 0
@@ -80,6 +95,15 @@ export function gerarHTMLRelatorio(dados: {
   const listaErros = dados.erros.length > 0
     ? dados.erros.map(e => `<li style="color:#e74c3c">${e}</li>`).join('')
     : '<li style="color:#2ecc71">Nenhum erro</li>';
+  const vagasPuloAltoScore = dados.vagasPuloAltoScore ?? [];
+  const listaPulosAltoScore = vagasPuloAltoScore.length > 0
+    ? vagasPuloAltoScore.map(v => `
+      <li style="margin-bottom: 14px;">
+        <a href="${escapeHtml(v.url)}" style="color:#2980b9; font-weight:600;">${escapeHtml(v.titulo_vaga || 'Vaga sem título')}</a>
+        <div style="color:#7f8c8d; margin-top:3px;">${escapeHtml(v.empresa || 'Empresa não informada')} · ${escapeHtml(v.plataforma || 'plataforma não informada')} · score ${v.score}/10</div>
+        <div style="margin-top:4px;">${escapeHtml(v.motivo_pulo)}</div>
+      </li>`).join('')
+    : '<li style="color:#7f8c8d">Nenhuma vaga com score ≥ 8 foi pulada nesta execução.</li>';
 
   return `
 <!DOCTYPE html>
@@ -102,9 +126,23 @@ export function gerarHTMLRelatorio(dados: {
     <h3 style="color: #2c3e50;">Erros</h3>
     <ul>${listaErros}</ul>
 
+    <h3 style="color: #2c3e50;">Vagas bem pontuadas que foram puladas</h3>
+    <p style="color:#7f8c8d;">A partir de score 8/10, para facilitar a revisão das decisões do agente.</p>
+    <ul>${listaPulosAltoScore}</ul>
+
     <hr style="border: none; border-top: 1px solid #ecf0f1; margin: 24px 0;">
     <p style="color: #bdc3c7; font-size: 12px;">Gerado automaticamente pelo Office Boy</p>
   </div>
 </body>
 </html>`;
+}
+
+function escapeHtml(valor: string): string {
+  return valor.replace(/[&<>"']/g, caractere => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[caractere] ?? caractere);
 }

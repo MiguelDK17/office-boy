@@ -36,6 +36,8 @@ x-comum: &comum
     # Escrita liberada: a UI (PUT /api/config/*) salva perfil/respostas/sites/
     # currículos direto no host — persiste entre rebuilds.
     - ./config:/app/config
+    # Plugins MCP declarativos instalados pela UI.
+    - ./plugins:/app/plugins
     - ./curriculos:/app/curriculos
     # .env montado para a UI ler/salvar variáveis (PUT /api/config/env).
     # O compose aplica os novos valores no recreate (`docker compose up -d`).

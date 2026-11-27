@@ -3,7 +3,12 @@ import { log } from './logger.js';
 
 let telegramConfig: { botToken: string; chatId: string } | null = null;
 
-export function configurarTelegram(botToken: string, chatId: string): void {
+export function configurarTelegram(botToken: string, chatId: string, ativo = true): void {
+  telegramConfig = null;
+  if (!ativo) {
+    log('INFO', 'Telegram: Notificações desativadas pela configuração.');
+    return;
+  }
   if (!botToken || !chatId) {
     log('WARN', 'Telegram: BOT_TOKEN ou CHAT_ID não configurados. Notificações desativadas.');
     return;

@@ -21,6 +21,7 @@ import type {
   LogLine,
   Progresso,
   Snapshot,
+  ModoExecucao,
 } from "../lib/types";
 
 const MAX_LINHAS = 400;
@@ -45,7 +46,7 @@ export interface UseBot {
   dados: ApiData | null;
   /** Mensagem de erro da última tentativa de iniciar (ex.: navegador off). */
   erroIniciar: string | null;
-  iniciar: (dryRun: boolean, maxIteracoes: number | null, metaCandidaturas: number | null) => Promise<void>;
+  iniciar: (dryRun: boolean, maxIteracoes: number | null, metaCandidaturas: number | null, modo: ModoExecucao) => Promise<void>;
   parar: () => Promise<void>;
   pausar: () => Promise<void>;
   retomar: () => Promise<void>;
@@ -63,6 +64,7 @@ const estadoInicial: EstadoRun = {
   ultimoCusto: null,
   iteracaoAtual: 0,
   iteracaoTotal: 0,
+  modo: "full",
 };
 
 export function useBot(): UseBot {
@@ -121,6 +123,7 @@ export function useBot(): UseBot {
           ultimoCusto: s.ultimoCusto,
           iteracaoAtual: s.iteracaoAtual,
           iteracaoTotal: s.iteracaoTotal,
+          modo: s.modo,
         });
         void recarregarDados();
       },
@@ -161,9 +164,9 @@ export function useBot(): UseBot {
   }, [recarregarDados]);
 
   const iniciar = useCallback(
-    async (dryRun: boolean, maxIteracoes: number | null, metaCandidaturas: number | null) => {
+    async (dryRun: boolean, maxIteracoes: number | null, metaCandidaturas: number | null, modo: ModoExecucao) => {
       setErroIniciar(null);
-      const erro = await iniciarBot(dryRun, maxIteracoes, metaCandidaturas);
+      const erro = await iniciarBot(dryRun, maxIteracoes, metaCandidaturas, modo);
       if (erro) setErroIniciar(erro);
     },
     [],

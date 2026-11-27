@@ -167,6 +167,7 @@ export function Field({
   badge,
   disabled,
   onChange,
+  onBlur,
 }: {
   label: string;
   technicalName?: string;
@@ -178,6 +179,7 @@ export function Field({
   badge?: string;
   disabled?: boolean;
   onChange: (valor: string) => void;
+  onBlur?: () => void;
 }) {
   const invalido = type === "number" && String(value) !== "" && Number(value) < 0;
   return (
@@ -193,6 +195,7 @@ export function Field({
           placeholder={placeholder}
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
+          onBlur={onBlur}
         />
         {unit && <span>{unit}</span>}
       </div>
@@ -425,11 +428,13 @@ export function SecretField({
   technicalName,
   definido,
   onChange,
+  onBlur,
 }: {
   label: string;
   technicalName?: string;
   definido: boolean;
   onChange: (valor: string) => void;
+  onBlur?: () => void;
 }) {
   const [replacing, setReplacing] = useState(false);
   const [rascunho, setRascunho] = useState("");
@@ -452,6 +457,7 @@ export function SecretField({
               setRascunho(event.target.value);
               onChange(event.target.value);
             }}
+            onBlur={onBlur}
           />
         ) : (
           <div className="masked-value">

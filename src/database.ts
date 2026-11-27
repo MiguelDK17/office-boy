@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { log } from './logger.js';
 import { chaveVaga } from './chave-vaga.js';
-import type { Candidatura } from './types.js';
+import type { Candidatura, StatusFilaVaga, VagaFila } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.resolve(__dirname, '..', 'data', 'candidaturas.db');
@@ -88,6 +88,24 @@ export function inicializarBanco(dbPath: string = DB_PATH): Database.Database {
       chave_vaga TEXT
     )
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fila_vagas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      url TEXT UNIQUE NOT NULL,
+      chave_vaga TEXT,
+      titulo_vaga TEXT NOT NULL,
+      empresa TEXT NOT NULL,
+      plataforma TEXT NOT NULL DEFAULT 'Rebase Jobs',
+      descricao TEXT,
+      localizacao TEXT,
+      score INTEGER DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pendente',
+      motivo TEXT,
+      data_criacao TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fila_vagas_status ON fila_vagas(status, data_criacao)');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS cache_respostas (
@@ -279,10 +297,99 @@ export function registrarVagaVista(dados: {
   }
 }
 
+export interface VagaVistaRelatorio {
+  titulo_vaga: string;
+  empresa: string;
+  plataforma: string;
+  url: string;
+  score: number;
+  motivo_pulo: string;
+  data_vista: string;
+}
+
+/** Vagas de score alto puladas desde o início da execução atual. */
+export function listarVagasVistasDesde(dataInicio: string, scoreMinimo = 8): VagaVistaRelatorio[] {
+  return db.prepare(`
+    SELECT titulo_vaga, empresa, plataforma, url, score, motivo_pulo, data_vista
+    FROM vagas_vistas
+    WHERE data_vista >= ? AND score >= ? AND motivo_pulo IS NOT NULL AND TRIM(motivo_pulo) <> ''
+    ORDER BY id ASC
+  `).all(dataInicio, scoreMinimo) as VagaVistaRelatorio[];
+}
+
 export function verificarVagaJaVista(url: string): boolean {
   const chave = chaveVaga(url);
   const row = db.prepare('SELECT id FROM vagas_vistas WHERE chave_vaga = ? OR url = ?').get(chave, url);
   return !!row;
+}
+
+export function inserirVagaNaFila(vaga: Omit<VagaFila, 'id' | 'status'> & { status?: StatusFilaVaga }): boolean {
+  try {
+    const chave = chaveVaga(vaga.url);
+    const existente = db.prepare('SELECT id, status FROM fila_vagas WHERE chave_vaga = ? OR url = ? LIMIT 1')
+      .get(chave, vaga.url) as { id: number; status: StatusFilaVaga } | undefined;
+    if (existente) {
+      const status = existente.status === 'pendente' ? (vaga.status ?? 'pendente') : existente.status;
+      return db.prepare(`
+        UPDATE fila_vagas SET url = ?, chave_vaga = ?, titulo_vaga = ?, empresa = ?, plataforma = ?,
+          descricao = COALESCE(?, descricao), localizacao = COALESCE(?, localizacao),
+          score = CASE WHEN status = 'pendente' THEN ? ELSE score END, status = ?, motivo = COALESCE(?, motivo)
+        WHERE id = ?
+      `).run(
+        vaga.url, chave, vaga.titulo_vaga, vaga.empresa, vaga.plataforma,
+        vaga.descricao ?? null, vaga.localizacao ?? null, vaga.score ?? 0,
+        status, vaga.motivo ?? null, existente.id,
+      ).changes > 0;
+    }
+    return db.prepare(`
+      INSERT INTO fila_vagas
+        (url, chave_vaga, titulo_vaga, empresa, plataforma, descricao, localizacao, score, status, motivo)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      vaga.url, chave, vaga.titulo_vaga, vaga.empresa, vaga.plataforma,
+      vaga.descricao ?? null, vaga.localizacao ?? null, vaga.score ?? 0,
+      vaga.status ?? 'pendente', vaga.motivo ?? null,
+    ).changes > 0;
+  } catch (error) {
+    log('ERRO', `inserirVagaNaFila falhou: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+export function listarVagasFila(limite = 25, status: StatusFilaVaga = 'pendente'): VagaFila[] {
+  const n = Math.min(Math.max(Math.floor(limite) || 25, 1), 100);
+  return db.prepare(`
+    SELECT id, url, titulo_vaga, empresa, plataforma, descricao, localizacao, score, status, motivo, data_criacao
+    FROM fila_vagas WHERE status = ? ORDER BY score DESC, data_criacao DESC LIMIT ?
+  `).all(status, n) as VagaFila[];
+}
+
+/** Reserva vagas para uma execução apply; claims antigos são recuperáveis. */
+export function reivindicarVagasFila(limite = 25): VagaFila[] {
+  const n = Math.min(Math.max(Math.floor(limite) || 25, 1), 100);
+  return db.transaction(() => {
+    db.prepare("UPDATE fila_vagas SET status = 'pendente' WHERE status = 'processando' AND datetime(data_criacao) < datetime('now', 'localtime', '-2 hours')").run();
+    const vagas = db.prepare(`
+      SELECT id, url, titulo_vaga, empresa, plataforma, descricao, localizacao, score, status, motivo, data_criacao
+      FROM fila_vagas WHERE status = 'pendente' ORDER BY score DESC, data_criacao DESC LIMIT ?
+    `).all(n) as VagaFila[];
+    const marcar = db.prepare("UPDATE fila_vagas SET status = 'processando' WHERE id = ? AND status = 'pendente'");
+    const reservadas: VagaFila[] = [];
+    for (const vaga of vagas) {
+      if (marcar.run(vaga.id).changes > 0) reservadas.push({ ...vaga, status: 'processando' });
+    }
+    return reservadas;
+  })();
+}
+
+export function atualizarStatusVagaFila(url: string, status: StatusFilaVaga, motivo?: string): boolean {
+  try {
+    return db.prepare('UPDATE fila_vagas SET status = ?, motivo = COALESCE(?, motivo) WHERE url = ? OR chave_vaga = ?')
+      .run(status, motivo ?? null, url, chaveVaga(url)).changes > 0;
+  } catch (error) {
+    log('ERRO', `atualizarStatusVagaFila falhou: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
 }
 
 export function atualizarScreenshot(url: string, screenshotPath: string): void {
@@ -513,6 +620,11 @@ export function salvarRespostaCache(pergunta: string, tipoCampo: string, respost
 export function contarCacheRespostas(): number {
   const row = db.prepare('SELECT COUNT(*) as total FROM cache_respostas').get() as { total: number };
   return row.total;
+}
+
+/** Timestamp no mesmo relógio/formato usado pelos defaults das tabelas. */
+export function obterAgoraBanco(): string {
+  return (db.prepare("SELECT datetime('now', 'localtime') AS agora").get() as { agora: string }).agora;
 }
 
 export function fecharBanco(): void {

@@ -2,6 +2,30 @@
 // e os componentes da UI.
 
 export type BotState = "stopped" | "running" | "paused" | "stopping" | "offline";
+export type ModoExecucao = "full" | "discovery" | "apply";
+
+export interface PluginSettingInfo {
+  key: string;
+  label: string;
+  type: "text" | "secret" | "boolean" | "number";
+  hint?: string;
+  required?: boolean;
+  defined: boolean;
+  value?: string | number | boolean;
+}
+
+export interface PluginInfo {
+  id: string;
+  version: string;
+  name: string;
+  description: string;
+  connection: { transport: "streamable-http" | "stdio"; url?: string; command?: string; authentication?: "bearer" | "none" };
+  enabled: boolean;
+  configured: boolean;
+  connectionStatus: "inactive" | "ready" | "invalid" | "connected" | "error";
+  settings: PluginSettingInfo[];
+  tools: Array<{ name: string; scope: "read" | "discovery" | "queue" | "apply" }>;
+}
 
 // ========== /api/config (telas Perfil e Configurações) ==========
 
@@ -64,6 +88,7 @@ export interface EstadoRun {
   ultimoCusto: number | null;
   iteracaoAtual: number;
   iteracaoTotal: number;
+  modo: ModoExecucao;
 }
 
 export interface Snapshot extends EstadoRun {
@@ -119,6 +144,7 @@ export interface ApiData {
     iteracaoTotal: number;
     candidaturasDaRun: number;
     ultimoCusto: number | null;
+    modo: ModoExecucao;
   };
 }
 

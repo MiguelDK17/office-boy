@@ -13,6 +13,8 @@ import {
   listarCandidaturas,
   registrarVagaVista,
   verificarVagaJaVista,
+  reivindicarVagasFila,
+  atualizarStatusVagaFila,
   atualizarScreenshot,
   buscarRespostaCache,
   buscarCandidatasCache,
@@ -152,6 +154,17 @@ const customToolDefs: CustomToolDef[] = [
     },
   },
   {
+    name: 'listar_vagas_fila',
+    description:
+      'Usada no modo APPLY para listar vagas previamente descobertas pelo Rebase Jobs. Retorna somente vagas pendentes, ordenadas por score. Para cada vaga, navegue DIRETO para a URL e processe com o fluxo normal. Não use em modo discovery.',
+    parameters: {
+      type: 'object',
+      properties: {
+        limite: { type: 'number', description: 'Máximo de vagas pendentes a retornar (padrão 25, teto 100).' },
+      },
+    },
+  },
+  {
     name: 'verificar_avaliacao_empresa',
     description:
       'OBRIGATORIA em vagas do Indeed antes de pontuar ou candidatar. Lê a avaliação pública da empresa na página de detalhe. Se a nota for menor ou igual a 2.5, NÃO se candidate; pule a vaga. Se não houver avaliação pública, retorna null e o fluxo pode continuar. Não use a nota da vaga para substituir a nota da empresa.',
@@ -250,6 +263,19 @@ const customToolDefs: CustomToolDef[] = [
         },
       },
       required: ['url_vaga', 'plataforma', 'titulo_vaga', 'empresa', 'score'],
+    },
+  },
+  {
+    name: 'confirmar_tool_mcp_apply',
+    description:
+      'CONFIRMA explicitamente uma tool MCP declarada com escopo apply antes de sua execução. Use imediatamente antes da tool, informando o plugin e o nome exatos. Sem esta confirmação, a execução será bloqueada.',
+    parameters: {
+      type: 'object',
+      properties: {
+        plugin: { type: 'string', description: 'ID do plugin que fornece a tool.' },
+        tool: { type: 'string', description: 'Nome exato da tool MCP com escopo apply.' },
+      },
+      required: ['plugin', 'tool'],
     },
   },
   {
@@ -414,7 +440,7 @@ const customToolDefs: CustomToolDef[] = [
         },
         motivo_pulo: {
           type: "string",
-          description: 'Motivo pelo qual a vaga foi pulada',
+          description: 'Motivo curto e específico pelo qual a vaga foi pulada. Obrigatório na prática para score >= 8, pois aparece no relatório por email.',
         },
       },
       required: ['url'],
@@ -758,6 +784,20 @@ export function criarExecutorDeTools(
   // (não adianta tentar outras URLs/páginas; só queima iterações e risco de ban).
   const portaisBloqueados = new Set<string>();
 
+  function rebaseHostPermitido(url: string, plataforma: string): boolean {
+    if (config.modoExecucao !== 'apply' || !/rebase/i.test(plataforma)) return true;
+    if (config.rebaseJobsAllowExternalApply) return true;
+    try {
+      const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+      return (config.rebaseJobsAllowedHosts ?? []).some(permitido => {
+        const normalizado = permitido.replace(/^www\./, '');
+        return host === normalizado || host.endsWith(`.${normalizado}`);
+      });
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Registro determinístico com os mesmos gates da tool registrar_candidatura.
    * Também é chamado pelo confirmar_envio: assim o clique de envio nunca fica
@@ -809,6 +849,10 @@ export function criarExecutorDeTools(
       score,
     });
     if (!sucesso) return { registrado: false, motivo: 'DUPLICATA_OU_ERRO', mensagem: 'Candidatura ja registrada ou falha ao gravar.' };
+
+    const statusFinal = dados.status ?? (config.dryRun ? 'dry-run' : 'aplicado');
+    if (statusFinal === 'pendente') atualizarStatusVagaFila(dados.url, 'processando');
+    else if (statusFinal === 'aplicado') atualizarStatusVagaFila(dados.url, 'aplicado');
 
     log('AGENTE', `Candidatura registrada: ${dados.titulo_vaga} — ${dados.empresa} (score: ${score})`);
     notificarCandidatura(dados.empresa, dados.titulo_vaga, score, config.dryRun).catch(() => {});
@@ -951,6 +995,14 @@ export function criarExecutorDeTools(
         const acaoNormalizada = acao.toLocaleLowerCase('pt-BR');
         const ehMensagemRecrutador = acaoNormalizada.includes('mensagem')
           && acaoNormalizada.includes('recrutador');
+
+        if (!ehMensagemRecrutador && !rebaseHostPermitido(urlVaga, String(args.plataforma ?? ''))) {
+          return JSON.stringify({
+            permitido: false,
+            motivo: 'DOMINIO_REBASE_NAO_AUTORIZADO',
+            mensagem: 'Envio bloqueado: esta vaga veio do Rebase Jobs e o domínio externo ainda não foi autorizado. Defina REBASE_JOBS_ALLOW_EXTERNAL_APPLY=true ou adicione o host em REBASE_JOBS_ALLOWED_HOSTS.',
+          });
+        }
 
         const tituloEnvio = String(args.titulo_vaga ?? '');
         const empresaEnvio = String(args.empresa ?? '');
@@ -1140,6 +1192,11 @@ export function criarExecutorDeTools(
         const limite = (args.limite as number) || 20;
         const candidaturas = listarCandidaturas(limite);
         return JSON.stringify(candidaturas, null, 2);
+      }
+
+      case 'listar_vagas_fila': {
+        const limite = (args.limite as number) || 25;
+        return JSON.stringify(reivindicarVagasFila(limite), null, 2);
       }
 
       case 'pontuar_vaga': {
@@ -1399,13 +1456,19 @@ export function criarExecutorDeTools(
       }
 
       case 'registrar_vaga_vista': {
+        const titulo = args.titulo_vaga as string | undefined;
+        const empresa = args.empresa as string | undefined;
+        const score = typeof args.score === 'number'
+          ? args.score
+          : scorePorVaga.get(chaveScore(titulo ?? '', empresa ?? '')) ?? 0;
         const sucesso = registrarVagaVista({
           url: args.url as string,
-          titulo_vaga: args.titulo_vaga as string | undefined,
-          empresa: args.empresa as string | undefined,
+          titulo_vaga: titulo,
+          empresa,
           plataforma: args.plataforma as string | undefined,
-          score: args.score as number | undefined,
-          motivo_pulo: args.motivo_pulo as string | undefined,
+          score,
+          motivo_pulo: (args.motivo_pulo as string | undefined)?.trim()
+            || (score >= 8 ? 'Vaga pulada pelo agente após análise; motivo não informado.' : undefined),
         });
         return sucesso
           ? 'REGISTRADO: Vaga marcada como vista.'
@@ -1493,6 +1556,9 @@ export function criarExecutorDeTools(
         // Se o envio tinha sido liberado mas o clique falhou, desfaz o registro
         // provisório — senão a vaga ficaria presa como "já aplicada" para sempre.
         if (urlVaga) removerPendente(urlVaga);
+        if (urlVaga && config.modoExecucao === 'apply') {
+          atualizarStatusVagaFila(urlVaga, 'pendente', `${codigoFalha}: ${descricaoFalha}`.slice(0, 500));
+        }
 
         // P7: portal já bloqueado nesta execução — nem tenta, manda pular o site.
         if (dominio && portaisBloqueados.has(dominio)) {

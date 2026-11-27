@@ -30,6 +30,7 @@ import { inicializarBanco, fecharBanco, contarCandidaturasDesde, listarCandidatu
 import { gerarHTML } from './dashboard.js';
 import { BOOT_ID, registrarAoReiniciar, rotearConfig } from './config-api.js';
 import { migrarIdsSites, rotearSites } from './sites-api.js';
+import { origemLocalPermitida } from './local-origin.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -95,6 +96,7 @@ interface EstadoRun {
   /** Progresso do loop do agente, extraído das linhas "Iteracao N/M". */
   iteracaoAtual: number;
   iteracaoTotal: number;
+  modo: 'full' | 'discovery' | 'apply';
 }
 
 const estado: EstadoRun = {
@@ -114,9 +116,19 @@ const estado: EstadoRun = {
   ultimoCusto: null,
   iteracaoAtual: 0,
   iteracaoTotal: 0,
+  modo: 'full',
 };
 
 let processo: ChildProcess | null = null;
+
+function controleAutorizado(req: http.IncomingMessage, exigeToken = false): boolean {
+  const configurado = (process.env.DASHBOARD_TOKEN || '').trim();
+  const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const apresentado = req.headers['x-config-token'] || bearer;
+  if (exigeToken && !configurado) return false;
+  if (configurado) return typeof apresentado === 'string' && apresentado === configurado;
+  return origemLocalPermitida(req);
+}
 
 // Prazo para o bot encerrar após o SIGTERM (parada suave). Ele termina a
 // iteração atual antes de sair — isso pode levar alguns minutos (chamada LLM
@@ -219,6 +231,7 @@ function broadcastEstado(): void {
     ultimoCusto: estado.ultimoCusto,
     iteracaoAtual: estado.iteracaoAtual,
     iteracaoTotal: estado.iteracaoTotal,
+    modo: estado.modo,
   });
 }
 
@@ -242,10 +255,14 @@ export async function iniciarRun(
   dryRun?: boolean,
   maxIteracoes?: number,
   metaCandidaturas?: number,
+  modo?: 'full' | 'discovery' | 'apply',
 ): Promise<{ ok: boolean; motivo?: string; maxIteracoes?: number; metaCandidaturas?: number }> {
   if (estado.rodando) return { ok: false, motivo: 'Já existe um run em andamento' };
 
-  const nav = await consultarNavegador();
+  const modoRun = modo ?? (process.env.OFFICEBOY_MODE === 'apply'
+    ? 'apply'
+    : process.env.OFFICEBOY_MODE === 'discovery' ? 'discovery' : 'full');
+  const nav = modoRun === 'discovery' ? null : await consultarNavegador();
   if (nav && !nav.conectado) {
     const motivo = `Navegador indisponível em ${nav.endpoint} — o Chrome não está respondendo. `
       + 'Verifique o container (docker compose logs) e tente de novo em instantes.';
@@ -271,6 +288,7 @@ export async function iniciarRun(
   estado.origem = 'ui';
   estado.iteracaoAtual = 0;
   estado.iteracaoTotal = limiteIteracoes;
+  estado.modo = modoRun;
 
   // O filho NÃO sobe dashboard (esta porta já é do control server) e roda em
   // modo agente normal. MAX_ITERACOES e META_CANDIDATURAS sobrescrevem o .env
@@ -283,10 +301,11 @@ export async function iniciarRun(
     DRY_RUN: String(usarDryRun),
     MAX_ITERACOES: String(limiteIteracoes),
     META_CANDIDATURAS: String(meta),
+    OFFICEBOY_MODE: modoRun,
   };
 
-  registrarLinha(`[control] iniciando bot (dry-run=${usarDryRun}, iteracoes<=${limiteIteracoes}, meta=${meta}) — ${command} ${args.join(' ')}`);
-  log('INFO', `Control: iniciando bot (dry-run=${usarDryRun}, max ${limiteIteracoes} iteracoes, meta ${meta} candidaturas)`);
+  registrarLinha(`[control] iniciando bot (modo=${modoRun}, dry-run=${usarDryRun}, iteracoes<=${limiteIteracoes}, meta=${meta}) — ${command} ${args.join(' ')}`);
+  log('INFO', `Control: iniciando bot (modo=${modoRun}, dry-run=${usarDryRun}, max ${limiteIteracoes} iteracoes, meta ${meta} candidaturas)`);
   broadcastEstado();
 
   processo = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -568,6 +587,7 @@ export function iniciarControlServer(port: number, host: string): void {
         ultimoCusto: estado.ultimoCusto,
         iteracaoAtual: estado.iteracaoAtual,
         iteracaoTotal: estado.iteracaoTotal,
+        modo: estado.modo,
         maxIteracoesPadrao: PADRAO_MAX_ITERACOES,
         metaCandidaturasPadrao: PADRAO_META_CANDIDATURAS,
         linhas: estado.linhas.slice(-200),
@@ -639,6 +659,7 @@ export function iniciarControlServer(port: number, host: string): void {
           iteracaoTotal: estado.iteracaoTotal,
           candidaturasDaRun: contarCandidaturasDaRun(),
           ultimoCusto: estado.ultimoCusto,
+          modo: estado.modo,
         },
       }));
       return;
@@ -681,6 +702,7 @@ export function iniciarControlServer(port: number, host: string): void {
         linhas: estado.linhas.length,
         iteracaoAtual: estado.iteracaoAtual,
         iteracaoTotal: estado.iteracaoTotal,
+        modo: estado.modo,
         // Padrão de iterações (do .env) — usado para pré-preencher o campo na UI.
         maxIteracoesPadrao: PADRAO_MAX_ITERACOES,
         // Padrão da meta de qualidade (do .env) — idem, pré-preenche o campo.
@@ -712,8 +734,14 @@ export function iniciarControlServer(port: number, host: string): void {
       let dryRun: boolean | undefined;
       let maxIteracoes: number | undefined;
       let metaCandidaturas: number | undefined;
+      let modo: 'full' | 'discovery' | 'apply' | undefined;
       try {
-        const parsed = JSON.parse(corpo || '{}') as { dryRun?: boolean; maxIteracoes?: unknown; metaCandidaturas?: unknown };
+        const parsed = JSON.parse(corpo || '{}') as { dryRun?: boolean; maxIteracoes?: unknown; metaCandidaturas?: unknown; modo?: unknown };
+        const modoPedido = parsed.modo === 'full' || parsed.modo === 'discovery' || parsed.modo === 'apply' ? parsed.modo : undefined;
+        if (!controleAutorizado(req, modoPedido === 'apply')) {
+          responderJSON(res, 403, { ok: false, mensagem: modoPedido === 'apply' ? 'Modo apply exige DASHBOARD_TOKEN.' : 'Acesso ao controle não autorizado.' });
+          return;
+        }
         if (typeof parsed.dryRun === 'boolean') dryRun = parsed.dryRun;
         if (parsed.maxIteracoes !== undefined && parsed.maxIteracoes !== null && parsed.maxIteracoes !== '') {
           maxIteracoes = saneiaMaxIteracoes(parsed.maxIteracoes);
@@ -721,10 +749,15 @@ export function iniciarControlServer(port: number, host: string): void {
         if (parsed.metaCandidaturas !== undefined && parsed.metaCandidaturas !== null && parsed.metaCandidaturas !== '') {
           metaCandidaturas = saneiaMetaCandidaturas(parsed.metaCandidaturas);
         }
+        modo = modoPedido;
       } catch {
         // corpo inválido: usa os padrões do .env
       }
-      const resultado = await iniciarRun(dryRun, maxIteracoes, metaCandidaturas);
+      if (!controleAutorizado(req, modo === 'apply')) {
+        responderJSON(res, 403, { ok: false, mensagem: modo === 'apply' ? 'Modo apply exige DASHBOARD_TOKEN.' : 'Acesso ao controle não autorizado.' });
+        return;
+      }
+      const resultado = await iniciarRun(dryRun, maxIteracoes, metaCandidaturas, modo);
       responderJSON(res, resultado.ok ? 200 : 409, {
         ok: resultado.ok,
         mensagem: resultado.ok ? 'Bot iniciado' : (resultado.motivo ?? 'Não foi possível iniciar'),
@@ -736,6 +769,7 @@ export function iniciarControlServer(port: number, host: string): void {
     }
 
     if (caminho === '/api/stop' && req.method === 'POST') {
+      if (!controleAutorizado(req)) { responderJSON(res, 403, { ok: false, mensagem: 'Acesso ao controle não autorizado.' }); return; }
       const ok = pararRun();
       responderJSON(res, ok ? 200 : 409, {
         ok,
@@ -745,6 +779,7 @@ export function iniciarControlServer(port: number, host: string): void {
     }
 
     if (caminho === '/api/pause' && req.method === 'POST') {
+      if (!controleAutorizado(req)) { responderJSON(res, 403, { ok: false, mensagem: 'Acesso ao controle não autorizado.' }); return; }
       const ok = pausarRun();
       responderJSON(res, ok ? 200 : 409, {
         ok,
@@ -754,6 +789,7 @@ export function iniciarControlServer(port: number, host: string): void {
     }
 
     if (caminho === '/api/resume' && req.method === 'POST') {
+      if (!controleAutorizado(req)) { responderJSON(res, 403, { ok: false, mensagem: 'Acesso ao controle não autorizado.' }); return; }
       const ok = retomarRun();
       responderJSON(res, ok ? 200 : 409, {
         ok,

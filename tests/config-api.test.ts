@@ -134,6 +134,8 @@ describe('api/config — correções da revisão', () => {
 
   it('SMTP_PORT renderiza como número (renderCampo despacha por tipo)', () => {
     expect(settings).toMatch(/const renderCampo = /);
-    expect(settings).toMatch(/porGrupo\.get\("notificacoes"\)\?\.map\(\(c\) => renderCampo\(c\)\)/);
+    expect(settings).toContain('get("notificacoes")');
+    expect(settings).toContain('TELEGRAM_ATIVO');
+    expect(settings).toContain('EMAIL_ATIVO');
   });
 });

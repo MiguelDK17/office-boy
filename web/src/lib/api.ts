@@ -10,6 +10,8 @@ import type {
   EstadoRun,
   LogLine,
   LogTone,
+  ModoExecucao,
+  PluginInfo,
   Progresso,
   Snapshot,
 } from "./types";
@@ -19,6 +21,67 @@ export async function carregarConfiguracao(): Promise<Configuracao> {
   const resp = await fetch("/api/config");
   if (!resp.ok) throw new Error(`api/config: ${resp.status}`);
   return (await resp.json()) as Configuracao;
+}
+
+export async function carregarPlugins(): Promise<PluginInfo[]> {
+  const resp = await fetch("/api/config/plugins", { cache: "no-store" });
+  if (!resp.ok) throw new Error(`api/config/plugins: ${resp.status}`);
+  const dados = (await resp.json()) as { plugins?: PluginInfo[] };
+  return dados.plugins ?? [];
+}
+
+export async function instalarPlugin(arquivo: File): Promise<string | null> {
+  const dados = new Uint8Array(await arquivo.arrayBuffer());
+  let binario = "";
+  const bloco = 0x8000;
+  for (let i = 0; i < dados.length; i += bloco) {
+    binario += String.fromCharCode(...dados.subarray(i, Math.min(i + bloco, dados.length)));
+  }
+  const resp = await fetchEscrita("/api/config/plugins/install", {
+    method: "POST",
+    body: JSON.stringify({ zipBase64: btoa(binario) }),
+  });
+  const body = (await resp.json().catch(() => ({}))) as { mensagem?: string };
+  return resp.ok ? null : (body.mensagem ?? "Falha ao instalar plugin");
+}
+
+export async function atualizarPlugin(arquivo: File): Promise<string | null> {
+  const dados = new Uint8Array(await arquivo.arrayBuffer());
+  let binario = "";
+  const bloco = 0x8000;
+  for (let i = 0; i < dados.length; i += bloco) {
+    binario += String.fromCharCode(...dados.subarray(i, Math.min(i + bloco, dados.length)));
+  }
+  const resp = await fetchEscrita("/api/config/plugins/update", {
+    method: "PUT",
+    body: JSON.stringify({ zipBase64: btoa(binario) }),
+  });
+  const body = (await resp.json().catch(() => ({}))) as { mensagem?: string };
+  return resp.ok ? null : (body.mensagem ?? "Falha ao atualizar plugin");
+}
+
+export async function alterarPlugin(id: string, enabled: boolean): Promise<string | null> {
+  return configurarPlugin(id, {}, enabled, false);
+}
+
+export async function configurarPlugin(
+  id: string,
+  values: Record<string, string | number | boolean>,
+  enabled?: boolean,
+  confirmarStdio = false,
+): Promise<string | null> {
+  const resp = await fetchEscrita(`/api/config/plugins/${encodeURIComponent(id)}`, {
+    method: "POST",
+    body: JSON.stringify({ values, ...(enabled === undefined ? {} : { enabled }), ...(confirmarStdio ? { confirmarStdio: true } : {}) }),
+  });
+  const body = (await resp.json().catch(() => ({}))) as { mensagem?: string };
+  return resp.ok ? null : (body.mensagem ?? "Falha ao alterar plugin");
+}
+
+export async function removerPlugin(id: string): Promise<string | null> {
+  const resp = await fetchEscrita(`/api/config/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const body = (await resp.json().catch(() => ({}))) as { mensagem?: string };
+  return resp.ok ? null : (body.mensagem ?? "Falha ao remover plugin");
 }
 
 let tokenPromise: Promise<string | null> | null = null;
@@ -235,12 +298,14 @@ export async function iniciarBot(
   dryRun: boolean,
   maxIteracoes?: number | null,
   metaCandidaturas?: number | null,
+  modo: ModoExecucao = "full",
 ): Promise<string | null> {
-  const resp = await fetch("/api/start", {
+  const resp = await fetchEscrita("/api/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       dryRun,
+      modo,
       ...(maxIteracoes != null && Number.isFinite(maxIteracoes)
         ? { maxIteracoes }
         : {}),
@@ -254,17 +319,17 @@ export async function iniciarBot(
 }
 
 export async function pararBot(): Promise<void> {
-  await fetch("/api/stop", { method: "POST" });
+  await fetchEscrita("/api/stop", { method: "POST" });
 }
 
 /** POST /api/pause — pausa na fronteira da iteração (processo vivo). */
 export async function pausarBot(): Promise<void> {
-  await fetch("/api/pause", { method: "POST" });
+  await fetchEscrita("/api/pause", { method: "POST" });
 }
 
 /** POST /api/resume — retoma um run pausado. */
 export async function retomarBot(): Promise<void> {
-  await fetch("/api/resume", { method: "POST" });
+  await fetchEscrita("/api/resume", { method: "POST" });
 }
 
 const LINHA = /^\[([^\]]+)\] \[(\w+)\]\s?(.*)$/;

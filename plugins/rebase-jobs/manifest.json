@@ -1,0 +1,52 @@
+{
+  "id": "rebase-jobs",
+  "version": "1.0.0",
+  "name": "Rebase Jobs",
+  "description": "Discovery de vagas e fila de candidaturas",
+  "connection": {
+    "transport": "streamable-http",
+    "url": "https://rebasedev.com.br/mcp",
+    "authentication": "bearer"
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "envKey": "REBASE_JOBS_ENABLED",
+      "label": "Usar Rebase Jobs",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "key": "url",
+      "envKey": "REBASE_JOBS_MCP_URL",
+      "label": "Endpoint MCP",
+      "type": "text",
+      "default": "https://rebasedev.com.br/mcp"
+    },
+    {
+      "key": "token",
+      "envKey": "REBASE_JOBS_TOKEN",
+      "label": "Token",
+      "type": "secret",
+      "required": true
+    },
+    {
+      "key": "allowExternalApply",
+      "envKey": "REBASE_JOBS_ALLOW_EXTERNAL_APPLY",
+      "label": "Permitir candidaturas externas",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "key": "allowedHosts",
+      "envKey": "REBASE_JOBS_ALLOWED_HOSTS",
+      "label": "Hosts permitidos",
+      "type": "text"
+    }
+  ],
+  "tools": [
+    { "name": "buscar_vagas", "scope": "discovery" },
+    { "name": "ver_vaga", "scope": "discovery" },
+    { "name": "sobre_o_catalogo", "scope": "read" }
+  ]
+}

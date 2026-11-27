@@ -16,7 +16,7 @@ import { TerminalPanel } from "./components/TerminalPanel";
 import { ProfileScreen } from "./screens/ProfileScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { prepararAudio, tocarSomPausa } from "./lib/som";
-import type { Candidatura } from "./lib/types";
+import type { Candidatura, ModoExecucao } from "./lib/types";
 
 type ActiveTab = "run" | "profile" | "settings";
 
@@ -63,6 +63,7 @@ export default function App() {
     candidaturasDaRun,
     iteracaoAtual,
     iteracaoTotal,
+    modo: modoDoServidor,
     logs,
     dados,
     erroIniciar,
@@ -94,6 +95,7 @@ export default function App() {
   const [detailsVisible, setDetailsVisible] = useState(false);
   const [limit, setLimit] = useState("");
   const [meta, setMeta] = useState("");
+  const [modo, setModo] = useState<ModoExecucao>("full");
   const [messageIndex, setMessageIndex] = useState(0);
 
   // Lembra tema e terminal entre sessões (mesma chave do dashboard legado).
@@ -128,6 +130,7 @@ export default function App() {
   const count = candidaturasDaRun;
   const totalIteracoes = iteracaoTotal || maxIteracoesPadrao;
   const progress = totalIteracoes > 0 ? (iteracaoAtual / totalIteracoes) * 100 : 0;
+  const modoVisivel = running || paused ? modoDoServidor : modo;
 
   useEffect(() => {
     if (!running) {
@@ -162,6 +165,7 @@ export default function App() {
       dryRun,
       Number.isFinite(n) && n >= 1 ? n : null,
       Number.isFinite(m) && m >= 0 ? m : null,
+      modo,
     );
   }
 
@@ -353,6 +357,22 @@ export default function App() {
           </div>
 
           <div className={`advanced-options ${advanced ? "advanced-visible" : ""}`}>
+            <label className="mode-field advanced-mode-field">
+              <span>Modo de execução</span>
+              <select
+                value={running || paused ? modoDoServidor : modo}
+                onChange={(event) => setModo(event.target.value as ModoExecucao)}
+                disabled={running || paused || stopping}
+                aria-describedby="run-mode-help"
+              >
+                <option value="full">Completo — buscar e candidatar</option>
+                <option value="discovery">Discovery — buscar e enfileirar</option>
+                <option value="apply">Apply — enviar da fila</option>
+              </select>
+              <small id="run-mode-help">
+                {modoVisivel === "discovery" ? "Busca e enfileira, sem candidatar." : modoVisivel === "apply" ? "Processa a fila de candidaturas." : "Busca e candidata na mesma run."}
+              </small>
+            </label>
             <div>
               <label htmlFor="run-limit">Interações por run</label>
               <span>Defina um limite para esta execução</span>
